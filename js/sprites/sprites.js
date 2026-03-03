@@ -175,36 +175,8 @@ export class TestSprite {
     draw(levelOffset){
         if (this.sheet && this.anim) {
             // Draw using Draw.sheet (sheet, pos, size, animation, frame, invert, opacity)
-            const invert = this.facing < 0 ? { x: -1, y: 1 } : null;
+            const invert = this.facing < 0 ? { x: -1, y: 1 } : {x: 1, y: 1};
             this.Draw.sheet(this.sheet, this.pos.add(levelOffset), this.size, this.anim, this.animFrame, invert, 1, false);
-        }
-        // debug draw: visualize tiles checked and collisions
-        if (this.debug && this._debugTiles && this._debugTiles.length && this.Draw) {
-            try {
-                const drawCtx = (this.Draw && this.Draw.ctx) ? this.Draw.ctx : null;
-                const uiW = drawCtx ? drawCtx.canvas.width / (this.Draw && this.Draw.Scale ? this.Draw.Scale.x : 1) : 0;
-                const uiH = drawCtx ? drawCtx.canvas.height / (this.Draw && this.Draw.Scale ? this.Draw.Scale.y : 1) : 0;
-                const center = new Vector(uiW / 2, uiH / 2);
-                const origin = (typeof this.zoomOrigin !== 'undefined' && this.zoomOrigin) ? this.zoomOrigin : center;
-                const zoom = (typeof this.zoom === 'number' && this.zoom > 0) ? this.zoom : 1;
-                const lvlOff = levelOffset || new Vector(0,0);
-
-                for (const t of this._debugTiles) {
-                    const worldTilePos = t.tileLocalPos.add(lvlOff);
-                    // draw in world-space and let Draw's current transform handle zoom
-                    const worldSize = new Vector(this.tileSize, this.tileSize);
-                    if (t.collided) {
-                        this.Draw.rect(worldTilePos, worldSize, '#FF000044');
-                    } else {
-                        this.Draw.rect(worldTilePos, worldSize, '#00000000', false, true, 1, '#00FF00AA');
-                    }
-                }
-
-                // draw sprite bbox in world-space in magenta
-                try {
-                    this.Draw.rect(this.pos.clone().add(levelOffset), this.size.clone(), '#00000000', false, true, 2, '#FF00FFAA');
-                } catch (e) {}
-            } catch (e) { /* ignore debug draw errors */ }
         }
     }
 }

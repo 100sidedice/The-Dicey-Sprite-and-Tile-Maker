@@ -121,7 +121,7 @@ export function initializeSpriteSceneState(scene, currentSprite) {
             zoomSmooth: 8,
             zoomImpulse: 12,
             zoomStep: -0.001,
-            minZoom: 0.05,
+            minZoom: 0.04,
             maxZoom: 16,
             offset: v(0, 0),
             pan: v(0, 0),
