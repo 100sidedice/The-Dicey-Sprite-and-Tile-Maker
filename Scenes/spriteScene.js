@@ -4153,12 +4153,15 @@ export class SpriteScene extends Scene {
                         // If target color equals fill color, nothing to do
                         if (srcR === fillR && srcG === fillG && srcB === fillB && srcA === fillA) return;
 
+                        const changes = [];
+                        const fillHex = this.rgbaToHex(fillR, fillG, fillB, fillA);
                         const shiftHeld = this.keys.held('Shift');
                         if (shiftHeld) {
                             // Global exact replace: replace every pixel matching src color
                             for (let p = 0; p < w * h; p++) {
                                 const idx = p * 4;
                                 if (data[idx] === srcR && data[idx+1] === srcG && data[idx+2] === srcB && data[idx+3] === srcA) {
+                                    changes.push({ x: (p % w), y: Math.floor(p / w), color: fillHex, blendType: 'replace' });
                                     data[idx] = fillR;
                                     data[idx+1] = fillG;
                                     data[idx+2] = fillB;
@@ -4177,7 +4180,8 @@ export class SpriteScene extends Scene {
                                 const idx = (y * wStride + x) * 4;
                                 // match source color exactly
                                 if (data[idx] !== srcR || data[idx+1] !== srcG || data[idx+2] !== srcB || data[idx+3] !== srcA) continue;
-                                // set to fill
+                                changes.push({ x, y, color: fillHex, blendType: 'replace' });
+                                // set to fill (also marks visited for this pass)
                                 data[idx] = fillR;
                                 data[idx+1] = fillG;
                                 data[idx+2] = fillB;
@@ -4190,14 +4194,14 @@ export class SpriteScene extends Scene {
                             }
                         }
 
-                        // write back and rebuild sheet
-                        ctx.putImageData(img, 0, 0);
-                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                        // Mirror the result immediately when mirror modes are active
-                        try {
-                            if (this.penMirrorH) this._applyInitialMirror('h');
-                            if (this.penMirrorV) this._applyInitialMirror('v');
-                        } catch (e) { /* ignore mirror apply errors */ }
+                        if (!changes.length) return;
+                        if (typeof sheet.modifyFrame === 'function') {
+                            sheet.modifyFrame(anim, frameIdx, changes);
+                        } else {
+                            for (const c of changes) {
+                                try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) { /* ignore */ }
+                            }
+                        }
                     } catch (e) {
                         // ignore image read/write errors
                     }
@@ -6823,6 +6827,26 @@ export class SpriteScene extends Scene {
                                 const idx = (typeof op.index === 'number' && op.index >= 0) ? Number(op.index) : undefined;
                                 try { this._suppressOutgoing = true; this.currentSprite.popFrame(op.anim, idx); } finally { this._suppressOutgoing = false; }
                                 applied++;
+                            } else if (op.action === 'renameAnimation') {
+                                const from = String(op.from || '').trim();
+                                const to = String(op.to || '').trim();
+                                if (from && to && from !== to) {
+                                    try {
+                                        this._suppressOutgoing = true;
+                                        if (typeof this.currentSprite.renameAnimation === 'function') {
+                                            this.currentSprite.renameAnimation(from, to);
+                                        } else if (this.currentSprite._frames && !this.currentSprite._frames.has(to) && this.currentSprite._frames.has(from)) {
+                                            const arr = this.currentSprite._frames.get(from);
+                                            this.currentSprite._frames.set(to, arr);
+                                            this.currentSprite._frames.delete(from);
+                                            if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas();
+                                        }
+                                    } finally {
+                                        this._suppressOutgoing = false;
+                                    }
+                                    try { this._remapAnimationReferences(from, to); } catch (e) {}
+                                    applied++;
+                                }
                             }
                         } catch (e) { /* ignore struct op errors */ }
                     } else if (op.type === 'tile') {
@@ -8225,6 +8249,49 @@ export class SpriteScene extends Scene {
         const relDx = (dx + N / 2) / N;
         const relDy = (dy + N / 2) / N;
         return { relX: relDx, relY: relDy };
+    }
+
+    _remapAnimationReferences(oldName, newName) {
+        try {
+            const from = String(oldName || '').trim();
+            const to = String(newName || '').trim();
+            if (!from || !to || from === to) return false;
+
+            if (this.selectedAnimation === from) this.selectedAnimation = to;
+
+            if (this._tileBrushBinding && this._tileBrushBinding.anim === from) {
+                this._tileBrushBinding = { ...this._tileBrushBinding, anim: to };
+            }
+
+            if (Array.isArray(this._areaBindings)) {
+                for (let i = 0; i < this._areaBindings.length; i++) {
+                    const b = this._areaBindings[i];
+                    if (!b || typeof b !== 'object') continue;
+                    if (b.anim === from) b.anim = to;
+                }
+            }
+
+            if (this._selectionKeyframeTrack && this._selectionKeyframeTrack.anim === from) {
+                this._selectionKeyframeTrack.anim = to;
+            }
+
+            if (this._tileConnMap && typeof this._tileConnMap === 'object') {
+                const next = {};
+                for (const key of Object.keys(this._tileConnMap)) {
+                    const value = this._tileConnMap[key];
+                    if (key.startsWith(from + '::')) {
+                        next[to + key.slice(from.length)] = value;
+                    } else {
+                        next[key] = value;
+                    }
+                }
+                this._tileConnMap = next;
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
     }
 
     _setAreaBindingAtIndex(areaIndex, bindingEntry, syncOp = true) {

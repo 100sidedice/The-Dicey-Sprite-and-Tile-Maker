@@ -172,6 +172,29 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                     return result;
                 };
             }
+
+            if (typeof sheet.renameAnimation === 'function') {
+                const originalRenameAnimation = sheet.renameAnimation.bind(sheet);
+                sheet.renameAnimation = (oldName, newName) => {
+                    const result = originalRenameAnimation(oldName, newName);
+                    try {
+                        if (result && !scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
+                            const id = (Date.now()) + '_' + Math.random().toString(36).slice(2, 6);
+                            const diff = {};
+                            diff['edits/' + id] = {
+                                type: 'struct',
+                                action: 'renameAnimation',
+                                from: String(oldName || ''),
+                                to: String(newName || ''),
+                                client: scene.clientId,
+                                time: Date.now()
+                            };
+                            try { scene._sendCollabDiff(diff); } catch (e) {}
+                        }
+                    } catch (e) {}
+                    return result;
+                };
+            }
         }
 
         try {

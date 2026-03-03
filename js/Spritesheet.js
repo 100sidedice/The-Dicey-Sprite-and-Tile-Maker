@@ -39,6 +39,41 @@ export default class SpriteSheet{
         }
     }
 
+    renameAnimation(oldName, newName){
+        try {
+            const from = String(oldName || '').trim();
+            const to = String(newName || '').trim();
+            if (!from || !to || from === to) return false;
+            if (!this._frames || !this._frames.has(from)) return false;
+            if (this._frames.has(to)) return false;
+
+            const frames = this._frames.get(from);
+            this._frames.set(to, frames);
+            this._frames.delete(from);
+
+            try {
+                if (this._frameGroups && this._frameGroups.has(from)) {
+                    const groups = this._frameGroups.get(from);
+                    this._frameGroups.set(to, groups);
+                    this._frameGroups.delete(from);
+                }
+            } catch (e) {}
+
+            try {
+                if (this.animations && this.animations.has(from)) {
+                    const meta = this.animations.get(from);
+                    this.animations.set(to, meta);
+                    this.animations.delete(from);
+                }
+            } catch (e) {}
+
+            try { this._rebuildSheetCanvas(); } catch (e) {}
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     // Free resources for a specific animation (clear canvases/descriptors)
     disposeAnimation(name){
         try {

@@ -477,13 +477,13 @@ class Game {
             this.UIDraw.rect(base, ui.menu.size, '#00000000', false, true, 2, '#FFFFFF66');
 
             // labels
-            this.UIDraw.text('Name:', new Vector(base.x + 12, base.y + 27), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
-            this.UIDraw.text('Room ID:', new Vector(base.x + 12, base.y + 62), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
-            this.UIDraw.text('Create', new Vector(base.x + 10 + 82, base.y + 82 + 26), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
-            this.UIDraw.text('Join', new Vector(base.x + 185 + 80, base.y + 82 + 26), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
-            this.UIDraw.text(ui.statusText || 'Status: Idle', new Vector(base.x + 12, base.y + 138), '#DDDDDD', 0, 13, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Name:', new Vector(base.x + 12, base.y + 27), '#FFFFFF', 0, 18, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Room ID:', new Vector(base.x + 12, base.y + 62), '#FFFFFF', 0, 18, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Create', new Vector(base.x + 10 + 82, base.y + 82 + 26), '#FFFFFF', 0, 18, { align: 'center', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Join', new Vector(base.x + 185 + 80, base.y + 82 + 26), '#FFFFFF', 0, 18, { align: 'center', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text(ui.statusText || 'Status: Idle', new Vector(base.x + 12, base.y + 138), '#DDDDDD', 0, 16, { align: 'left', baseline: 'middle', font: 'monospace' });
 
-            this.UIDraw.text('Track Cursor:', new Vector(base.x + 12, base.y + 162), '#FFFFFF', 0, 13, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Track Cursor:', new Vector(base.x + 12, base.y + 162), '#FFFFFF', 0, 16, { align: 'left', baseline: 'middle', font: 'monospace' });
             const users = this._getMultiplayerUsers();
             for (let i = 0; i < users.length; i++) {
                 const u = users[i];
@@ -492,7 +492,7 @@ class Game {
                 this.UIDraw.rect(swatchPos, new Vector(12, 12), u.color, true);
                 this.UIDraw.rect(swatchPos, new Vector(12, 12), '#00000000', false, true, 1, '#FFFFFFFF');
                 const name = u.self ? `${u.name} (you)` : u.name;
-                this.UIDraw.text(name, new Vector(base.x + 30, rowY + 8), '#FFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' });
+                this.UIDraw.text(name, new Vector(base.x + 30, rowY + 8), '#FFFFFF', 0, 15, { align: 'left', baseline: 'middle', font: 'monospace' });
 
                 const tx = base.x + ui.menu.size.x - 74;
                 const tpos = new Vector(tx, rowY - 3);
@@ -500,7 +500,7 @@ class Game {
                 const active = (ui.trackedCursorId === u.id);
                 this.UIDraw.rect(tpos, tsize, active ? '#2F7A2FFF' : '#444444FF', true);
                 this.UIDraw.rect(tpos, tsize, '#00000000', false, true, 1, '#FFFFFFAA');
-                this.UIDraw.text(active ? 'TRACK' : 'Track', new Vector(tpos.x + tsize.x / 2, tpos.y + 12), '#FFFFFF', 0, 11, { align: 'center', baseline: 'middle', font: 'monospace' });
+                this.UIDraw.text(active ? 'TRACK' : 'Track', new Vector(tpos.x + tsize.x / 2, tpos.y + 12), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
             }
         }
 

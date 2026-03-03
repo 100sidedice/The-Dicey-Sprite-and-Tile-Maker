@@ -321,12 +321,25 @@ export default class FrameSelect {
         if (!oldName || !newName) return false;
         newName = String(newName).trim();
         if (newName.length === 0) return false;
-        if (this.sprite._frames.has(newName)) return false; // avoid collision
-        const arr = this.sprite._frames.get(oldName);
-        this.sprite._frames.set(newName, arr);
-        this.sprite._frames.delete(oldName);
-        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-        if (this.scene && this.scene.selectedAnimation === oldName) this.scene.selectedAnimation = newName;
+        let ok = false;
+        if (typeof this.sprite.renameAnimation === 'function') {
+            ok = !!this.sprite.renameAnimation(oldName, newName);
+        } else {
+            if (this.sprite._frames.has(newName)) return false; // avoid collision
+            const arr = this.sprite._frames.get(oldName);
+            this.sprite._frames.set(newName, arr);
+            this.sprite._frames.delete(oldName);
+            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+            ok = true;
+        }
+        if (!ok) return false;
+        try {
+            if (this.scene && typeof this.scene._remapAnimationReferences === 'function') {
+                this.scene._remapAnimationReferences(oldName, newName);
+            } else if (this.scene && this.scene.selectedAnimation === oldName) {
+                this.scene.selectedAnimation = newName;
+            }
+        } catch (e) {}
         return true;
     }
 
