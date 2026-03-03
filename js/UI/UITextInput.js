@@ -13,11 +13,11 @@ export default class UITextInput extends UIButton {
         this._blink = 0;
         this._caretVisible = true;
         this._maxLength = 64;
-        this._lastKeyTime = {}; // per-key stall timestamps (ms)
-        this._stallMs = 120; // 120ms stall to avoid repeated presses
         this._passcodeToken = 'ui-textinput';
         this._savedPasscode = null;
         this._passcodeLocked = false;
+        this._heldKeyLatch = new Set();
+        this._leftMouseLatch = false;
     }
 
     focus(){
@@ -32,15 +32,22 @@ export default class UITextInput extends UIButton {
             try{ this.onSubmit.emit(this.text); } catch(e){}
         }
         this.focused = false;
+        this._heldKeyLatch.clear();
         this._unlockKeys();
     }
 
     _lockKeys(){
-        if (!this.keys || this._passcodeLocked) return;
+        if (!this.keys) return;
         try {
-            this._savedPasscode = this.keys.passcode || '';
-            this.keys.setPasscode(this._passcodeToken);
-            this._passcodeLocked = true;
+            // Capture prior passcode once when focus lock begins.
+            if (!this._passcodeLocked) {
+                this._savedPasscode = this.keys.passcode || '';
+                this._passcodeLocked = true;
+            }
+            // Re-assert token while focused in case another system changed it.
+            if (this.keys.passcode !== this._passcodeToken) {
+                this.keys.setPasscode(this._passcodeToken);
+            }
         } catch (e) {}
     }
 
@@ -77,12 +84,17 @@ export default class UITextInput extends UIButton {
             return (p.x >= rectPos.x && p.y >= rectPos.y && p.x <= rectPos.x + this.size.x && p.y <= rectPos.y + this.size.y);
         })();
 
-        // lock keybinds when hovering over the text input to avoid triggering global shortcuts
-        if (isInside || this.focused) this._lockKeys();
+        // Keep key passcode while focused (and only while focused).
+        if (this.focused) this._lockKeys();
         else this._unlockKeys();
 
-        // click to focus
-        if (this.mouse && this.mouse.released && this.mouse.released('left')){
+        // single-click start (held-edge) to focus; resilient if pressed() edge is missed
+        let leftHeld = false;
+        try { leftHeld = !!(this.mouse && this.mouse.held && this.mouse.held('left')); } catch (e) { leftHeld = false; }
+        const leftStart = leftHeld && !this._leftMouseLatch;
+        this._leftMouseLatch = leftHeld;
+
+        if (leftStart){
             // clicked inside?
             if (isInside){
                 this.focus();
@@ -94,31 +106,37 @@ export default class UITextInput extends UIButton {
 
         if (!this.focused) return;
 
-        // helper to consume a key press with stall
-        const now = Date.now();
-        const consumeKey = (k)=>{
-            try{
-                if (!this.keys.pressed(k, this._passcodeToken)) return false;
-            } catch(e){ return false; }
-            const last = this._lastKeyTime[k] || 0;
-            if (now - last < this._stallMs) return false;
-            this._lastKeyTime[k] = now;
-            return true;
-        };
+        let pressedKeys = [];
+        let heldKeys = [];
+        try {
+            if (this.keys && typeof this.keys.getKeysPressed === 'function') {
+                pressedKeys = this.keys.getKeysPressed(this._passcodeToken) || [];
+            }
+            if (this.keys && typeof this.keys.getKeysHeld === 'function') {
+                heldKeys = this.keys.getKeysHeld(this._passcodeToken) || [];
+            }
+        } catch (e) { pressedKeys = []; }
+
+        const edgeSet = new Set(pressedKeys);
+        const heldSet = new Set(heldKeys);
+        for (const k of heldSet) {
+            if (!this._heldKeyLatch.has(k)) edgeSet.add(k);
+        }
+        this._heldKeyLatch = heldSet;
 
         // backspace / enter / escape
         try{
-            if (consumeKey('Backspace')){
+            if (edgeSet.has('Backspace')){
                 if (this.text.length > 0){
                     this.text = this.text.slice(0, -1);
                     this.onChange.emit(this.text);
                 }
             }
-            if (consumeKey('Enter')){
+            if (edgeSet.has('Enter')){
                 this.onSubmit.emit(this.text);
                 this.blur(false);
             }
-            if (consumeKey('Escape')){
+            if (edgeSet.has('Escape')){
                 // Escape should simply blur without accepting
                 this.blur(false);
             }
@@ -126,16 +144,12 @@ export default class UITextInput extends UIButton {
 
         // handle printable characters: letters, numbers, space and common punctuation
         const allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_=[]{};:'\\\",.<>/?`~!@#$%^&*()+=\\|";
-        for (let i = 0; i < allowed.length; i++){
-            const ch = allowed[i];
-            try{
-                if (consumeKey(ch)){
-                    if (this.text.length < this._maxLength){
-                        this.text += ch;
-                        this.onChange.emit(this.text);
-                    }
-                }
-            } catch(e){}
+        const allowedSet = new Set(allowed.split(''));
+        for (const ch of edgeSet){
+            if (!allowedSet.has(ch)) continue;
+            if (this.text.length >= this._maxLength) break;
+            this.text += ch;
+            this.onChange.emit(this.text);
         }
     }
 

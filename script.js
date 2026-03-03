@@ -22,10 +22,9 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebas
 import { getDatabase } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
 import ServerManager from './js/Server/ServerManager.js';
 // firebaseConfig is loaded dynamically at runtime (may be gitignored on purpose)
-import createHButton from './js/htmlElements/createHButton.js';
-import createHDiv from './js/htmlElements/createHDiv.js';
-import createHInput from './js/htmlElements/createHInput.js';
-import createHLabel from './js/htmlElements/createHLabel.js';
+import Menu from './js/UI/Menu.js';
+import UIButton from './js/UI/Button.js';
+import UITextInput from './js/UI/UITextInput.js';
 
 
 const mainWidth = 1920;
@@ -209,84 +208,174 @@ class Game {
         this.sceneName = name;
     }
 
-    // Create a small DOM-based UI for creating/joining multiplayer rooms.
-    // The UI lives outside the canvas and forwards room actions to ServerManager.
+    _setMultiplayerStatus(text = 'Status: Idle') {
+        if (!this.multiplayerUI) return;
+        this.multiplayerUI.statusText = String(text || 'Status: Idle');
+    }
+
+    _bindRoomStateListener(handler) {
+        try {
+            if (!this.server || typeof this.server.on !== 'function') return;
+            // Keep one canonical state listener callback from the multiplayer menu.
+            this._roomStateListener = handler;
+            this.server.on('state', (state) => {
+                try {
+                    if (this._roomStateListener) this._roomStateListener(state);
+                } catch (e) {}
+            });
+        } catch (e) {}
+    }
+
+    _pointInRect(point, pos, size) {
+        if (!point || !pos || !size) return false;
+        return point.x >= pos.x
+            && point.y >= pos.y
+            && point.x <= pos.x + size.x
+            && point.y <= pos.y + size.y;
+    }
+
+    _layoutMultiplayerUI() {
+        if (!this.multiplayerUI) return;
+        const ui = this.multiplayerUI;
+        const openX = ui.openX;
+        const closedX = ui.closedX;
+        const y = ui.baseY;
+        ui.menu.pos.x = ui.visible ? openX : closedX;
+        ui.menu.pos.y = y;
+
+        const tabW = ui.toggleBtn.size.x;
+        const tabH = ui.toggleBtn.size.y;
+        ui.toggleBtn.pos.x = ui.menu.pos.x - tabW;
+        ui.toggleBtn.pos.y = ui.menu.pos.y + Math.floor((ui.menu.size.y - tabH) * 0.5);
+    }
+
+    _cursorColorForId(id) {
+        const colors = ['#FF5555FF','#55FF55FF','#5555FFFF','#FFFF55FF','#FF55FFFF','#55FFFFFF','#FFA500FF','#FFFFFF88'];
+        const hash = (String(id || '')).split('').reduce((s,c)=>s + c.charCodeAt(0),0) || 0;
+        return colors[hash % colors.length] || '#FFFFFF88';
+    }
+
+    _getMultiplayerUsers() {
+        const out = [];
+        const scene = this.currentScene;
+        if (!scene) return out;
+        try {
+            const selfId = scene.clientId || (scene.server && scene.server.playerId) || 'self';
+            const selfName = scene.playerName || selfId;
+            out.push({ id: selfId, name: selfName, color: this._cursorColorForId(selfId), self: true, entry: null });
+            const map = scene._remoteCursors;
+            if (map && typeof map.entries === 'function') {
+                for (const [cid, entry] of map.entries()) {
+                    if (!cid || cid === selfId) continue;
+                    out.push({ id: cid, name: (entry && entry.name) ? entry.name : cid, color: this._cursorColorForId(cid), self: false, entry });
+                }
+            }
+        } catch (e) {}
+        return out;
+    }
+
+    _applyTrackedCursorCamera() {
+        try {
+            const ui = this.multiplayerUI;
+            const scene = this.currentScene;
+            if (!ui || !scene || !ui.trackedCursorId) return;
+            if (ui.trackedCursorId === scene.clientId) return;
+            const entry = scene._remoteCursors && scene._remoteCursors.get(ui.trackedCursorId);
+            if (!entry) return;
+            if (!Number.isFinite(entry.zx) || !Number.isFinite(entry.zy) || !Number.isFinite(entry.ox) || !Number.isFinite(entry.oy)) return;
+            scene.zoom.x = Number(entry.zx);
+            scene.zoom.y = Number(entry.zy);
+            scene.offset.x = Number(entry.ox);
+            scene.offset.y = Number(entry.oy);
+        } catch (e) {}
+    }
+
+    setMultiplayerUIVisible(visible = true) {
+        if (!this.multiplayerUI) return false;
+        const next = !!visible;
+        this.multiplayerUI.visible = next;
+        this.multiplayerUI.menu.visible = next;
+        this._layoutMultiplayerUI();
+        try {
+            if (this.server && typeof this.server.unpause === 'function' && next) this.server.unpause();
+            if (this.server && typeof this.server.pause === 'function' && !next) this.server.pause();
+        } catch (e) {}
+        return true;
+    }
+
+    // Create an in-canvas UI for creating/joining multiplayer rooms.
+    // Uses engine UI elements so it stays in the same interaction system as the editor.
     createMultiplayerUI() {
         this.saver.remove('instance');
         console.log('Creating multiplayer UI');
 
         // --- Container panel (bottom-right) ---
-        const panelSize = new Vector(300, 130);
+        const panelSize = new Vector(360, 330);
         const margin = 20; // margin from screen edge
-        // Position relative to a 1920x1080 logical canvas: bottom-right origin
         const panelPos = new Vector(1920 - margin - panelSize.x, 1080 - margin - panelSize.y);
-        const panel = createHDiv(
-            'multiplayer-menu',
-            panelPos,
-            panelSize,
-            '#00000033',
-            {
-                borderRadius: '8px',
-                border: '1px solid #FFFFFF44',
-                backdropFilter: 'blur(4px)',
-                display: 'none',
-                flexDirection: 'column',
-                justifyContent: 'space-around',
-                alignItems: 'center',
-                color: '#fff',
-                padding: '8px',
-                fontFamily: 'sans-serif'
-            }
-        );
+        const panelLayer = 50;
+        const menu = new Menu(this.mouse, this.keys, panelPos, panelSize, panelLayer, '#000000CC');
+        const toggleBtn = new UIButton(this.mouse, this.keys, new Vector(0, 0), new Vector(20, 64), panelLayer + 1, null, '#2A2A2AEE', '#4A4A4AFF', '#1F1F1FFF');
 
-        // Child elements keep the same offsets relative to the panel's top-left
-        // Child positions are local offsets inside the panel (logical coordinates)
-        const label = createHLabel(null, new Vector(10, 10), new Vector(80, 30), 'Room ID:', { color:'#fff', fontSize:14, textAlign:'center' }, panel);
-        const input = createHInput(null, new Vector(100, 10), new Vector(200, 30), 'text', { background:'#222', color:'#fff', border:'1px solid #555', borderRadius:'4px', textAlign:'center' }, panel);
-        const statusLabel = createHLabel(null, new Vector(10, 120), new Vector(300,20), 'Status: Idle', { color:'#ddd', fontSize:14, textAlign:'left' }, panel);
+        const nameInput = new UITextInput(this.mouse, this.keys, new Vector(95, 10), new Vector(250, 28), panelLayer, '', 'username');
+        const input = new UITextInput(this.mouse, this.keys, new Vector(95, 44), new Vector(250, 30), panelLayer, '', 'room-id');
+        const createBtn = new UIButton(this.mouse, this.keys, new Vector(10, 82), new Vector(165, 40), panelLayer, null, '#333333', '#555555', '#222222');
+        const joinBtn = new UIButton(this.mouse, this.keys, new Vector(185, 82), new Vector(160, 40), panelLayer, null, '#333333', '#555555', '#222222');
+        menu.addElement('nameInput', nameInput);
+        menu.addElement('input', input);
+        menu.addElement('createBtn', createBtn);
+        menu.addElement('joinBtn', joinBtn);
 
-        const createBtn = createHButton(null, new Vector(10, 60), new Vector(130, 40), '#333', { color:'#fff', borderRadius:'6px', fontSize:14, border:'1px solid #777' }, panel);
-            createBtn.textContent = 'Create';
-
-        const joinBtn = createHButton(null, new Vector(170, 60), new Vector(130, 40), '#333', { color:'#fff', borderRadius:'6px', fontSize:14, border:'1px solid #777' }, panel);
-        joinBtn.textContent = 'Join';
+        try {
+            const scene = this.currentScene;
+            const initial = (scene && scene.playerName) ? scene.playerName : '';
+            nameInput.text = String(initial || '');
+            const applyName = (val) => {
+                try {
+                    const next = String(val || '').trim().slice(0, 64);
+                    if (this.currentScene) this.currentScene.playerName = next;
+                } catch (e) {}
+            };
+            nameInput.onSubmit.connect(applyName);
+            nameInput.onChange.connect(applyName);
+        } catch (e) {}
 
         const updateStatus = (state) => {
             if (!state) return;
             const p1Ready = state.p1x !== undefined && state.p1y !== undefined;
             const p2Ready = state.p2x !== undefined && state.p2y !== undefined;
 
-            if (p1Ready && p2Ready) statusLabel.textContent = 'Status: Connected!';
-            else if (p1Ready || p2Ready) statusLabel.textContent = 'Status: Waiting for other player...';
+            if (p1Ready && p2Ready) this._setMultiplayerStatus('Status: Connected!');
+            else if (p1Ready || p2Ready) this._setMultiplayerStatus('Status: Waiting for other player...');
         };
 
         // --- Button logic ---
-        createBtn.addEventListener('click', async () => {
+        createBtn.onPressed.left.connect(async () => {
             const roomId = await this.server.createRoom();
-            input.value = roomId;
-            statusLabel.textContent = 'Status: Room created! Waiting for player 2...';
+            input.text = roomId;
+            this._setMultiplayerStatus('Status: Room created! Waiting for player 2...');
             console.log('Room created:', roomId);
             this.enableMultiplayer.emit('p1');
 
             try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
 
             // Attach signal handler for this scene instance
-            this.server.on('state', (state) => {
+            this._bindRoomStateListener((state) => {
                 this.remoteStateSignal.emit(state,'p1'); 
                 this.playerCount = 2;
                 updateStatus(state);
             });
         });
 
-        joinBtn.addEventListener('click', async () => {
-            const roomId = input.value.trim();
+        joinBtn.onPressed.left.connect(async () => {
+            const roomId = String(input.text || '').trim();
             if (!roomId) {
-                statusLabel.textContent = 'Status: Enter room ID!';
+                this._setMultiplayerStatus('Status: Enter room ID!');
                 return;
             }
 
             await this.server.joinRoom(roomId);
-            statusLabel.textContent = 'Status: Joined room. Waiting for sync...';
+            this._setMultiplayerStatus('Status: Joined room. Waiting for sync...');
             console.log('Joined room:', roomId);
             this.enableMultiplayer.emit('p2');
 
@@ -305,7 +394,7 @@ class Game {
                     'sync/message': 'initial-join'
                 };
                 this.server.sendDiff(diff);
-                statusLabel.textContent = 'Status: Syncing...';
+                this._setMultiplayerStatus('Status: Syncing...');
             } catch (e) {
                 console.warn('Failed to request sync snapshot', e);
             }
@@ -313,14 +402,44 @@ class Game {
             const snapshot = await this.server.fetch('state');
             if (snapshot) this.remoteStateSignal.emit(snapshot);
 
-            this.server.on('state', (state) => {
+            this._bindRoomStateListener((state) => {
                 updateStatus(state);
                 this.playerCount = 2;
                 this.remoteStateSignal.emit(state,'p2'); // emit for this scene
             });
         });
 
-        this.uiElements = { panel, label, input, createBtn, joinBtn, statusLabel };
+        this.multiplayerUI = {
+            menu,
+            nameInput,
+            input,
+            createBtn,
+            joinBtn,
+            toggleBtn,
+            statusText: 'Status: Idle',
+            visible: false,
+            consumeInputFrames: 0,
+            trackedCursorId: null,
+            openX: panelPos.x,
+            closedX: 1920 - 6,
+            baseY: panelPos.y
+        };
+        this.multiplayerUI.menu.visible = false;
+        this._layoutMultiplayerUI();
+
+        toggleBtn.onPressed.left.connect(() => {
+            // Latch mouse blocking to prevent click-through during the same-frame layout swap.
+            this.multiplayerUI.consumeInputFrames = Math.max(2, Number(this.multiplayerUI.consumeInputFrames || 0));
+            try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.2); } catch (e) {}
+            this.setMultiplayerUIVisible(!this.multiplayerUI.visible);
+            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+        });
+
+        // Back-compat hooks used by debug commands.
+        try {
+            window.showMultiplayerMenu = () => this.setMultiplayerUIVisible(true);
+            window.hideMultiplayerMenu = () => this.setMultiplayerUIVisible(false);
+        } catch (e) {}
 
         // If multiplayer UI is hidden by default, pause server activity to save resources
         try {
@@ -345,6 +464,54 @@ class Game {
         }
     }
 
+    _drawMultiplayerUI() {
+        if (!this.multiplayerUI) return;
+        const ui = this.multiplayerUI;
+        this._layoutMultiplayerUI();
+
+        if (ui.visible) {
+            const base = ui.menu.pos;
+            ui.menu.draw(this.UIDraw);
+
+            // border
+            this.UIDraw.rect(base, ui.menu.size, '#00000000', false, true, 2, '#FFFFFF66');
+
+            // labels
+            this.UIDraw.text('Name:', new Vector(base.x + 12, base.y + 27), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Room ID:', new Vector(base.x + 12, base.y + 62), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Create', new Vector(base.x + 10 + 82, base.y + 82 + 26), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text('Join', new Vector(base.x + 185 + 80, base.y + 82 + 26), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
+            this.UIDraw.text(ui.statusText || 'Status: Idle', new Vector(base.x + 12, base.y + 138), '#DDDDDD', 0, 13, { align: 'left', baseline: 'middle', font: 'monospace' });
+
+            this.UIDraw.text('Track Cursor:', new Vector(base.x + 12, base.y + 162), '#FFFFFF', 0, 13, { align: 'left', baseline: 'middle', font: 'monospace' });
+            const users = this._getMultiplayerUsers();
+            for (let i = 0; i < users.length; i++) {
+                const u = users[i];
+                const rowY = base.y + 176 + i * 24;
+                const swatchPos = new Vector(base.x + 12, rowY);
+                this.UIDraw.rect(swatchPos, new Vector(12, 12), u.color, true);
+                this.UIDraw.rect(swatchPos, new Vector(12, 12), '#00000000', false, true, 1, '#FFFFFFFF');
+                const name = u.self ? `${u.name} (you)` : u.name;
+                this.UIDraw.text(name, new Vector(base.x + 30, rowY + 8), '#FFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' });
+
+                const tx = base.x + ui.menu.size.x - 74;
+                const tpos = new Vector(tx, rowY - 3);
+                const tsize = new Vector(62, 18);
+                const active = (ui.trackedCursorId === u.id);
+                this.UIDraw.rect(tpos, tsize, active ? '#2F7A2FFF' : '#444444FF', true);
+                this.UIDraw.rect(tpos, tsize, '#00000000', false, true, 1, '#FFFFFFAA');
+                this.UIDraw.text(active ? 'TRACK' : 'Track', new Vector(tpos.x + tsize.x / 2, tpos.y + 12), '#FFFFFF', 0, 11, { align: 'center', baseline: 'middle', font: 'monospace' });
+            }
+        }
+
+        // side tab toggle (always visible)
+        ui.toggleBtn.draw(this.UIDraw);
+        const tPos = ui.toggleBtn.pos;
+        const tSize = ui.toggleBtn.size;
+        const arrow = ui.visible ? '▶' : '◀';
+        this.UIDraw.text(arrow, new Vector(tPos.x + tSize.x / 2, tPos.y + tSize.y / 2 + 5), '#FFFFFF', 0, 16, { align: 'center', baseline: 'middle', font: 'monospace' });
+    }
+
 
 
     // Removes a scene from the map
@@ -361,8 +528,67 @@ class Game {
     update(delta) {
         this.runtime += delta;
         this.delta = delta;
+        let shouldBlockSceneInput = false;
+
+        // Let overlay UI process input first (more stable hit behavior for this menu).
+        if (this.mouse) this.mouse.uiBlockedByOverlay = false;
+
+        if (this.multiplayerUI) {
+            this._layoutMultiplayerUI();
+            if (this.multiplayerUI.toggleBtn) this.multiplayerUI.toggleBtn.update(delta);
+            if (this.multiplayerUI.visible && this.multiplayerUI.menu) this.multiplayerUI.menu.update(delta);
+            // Handle track-toggle clicks for current user list.
+            try {
+                const ui = this.multiplayerUI;
+                if (ui.visible && this.mouse && this.mouse.pressed && this.mouse.pressed('left')) {
+                    const users = this._getMultiplayerUsers();
+                    const base = ui.menu.pos;
+                    for (let i = 0; i < users.length; i++) {
+                        const u = users[i];
+                        const rowY = base.y + 176 + i * 24;
+                        const tx = base.x + ui.menu.size.x - 74;
+                        const tpos = new Vector(tx, rowY - 3);
+                        const tsize = new Vector(62, 18);
+                        if (this._pointInRect(this.mouse.pos, tpos, tsize)) {
+                            ui.trackedCursorId = (ui.trackedCursorId === u.id) ? null : u.id;
+                            try { this.mouse.pause(0.12); } catch (e) {}
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // Precompute overlay blocking before scene update so scene tools don't receive
+        // clicks that are meant for the multiplayer UI.
+        if (this.multiplayerUI) {
+            try {
+                const ui = this.multiplayerUI;
+                const overPanel = ui.visible && this._pointInRect(this.mouse.pos, ui.menu.pos, ui.menu.size);
+                const overToggle = this._pointInRect(this.mouse.pos, ui.toggleBtn.pos, ui.toggleBtn.size);
+                const typing = !!((ui.input && ui.input.focused) || (ui.nameInput && ui.nameInput.focused));
+                const latched = Number(ui.consumeInputFrames || 0) > 0;
+                shouldBlockSceneInput = !!(overPanel || overToggle || typing || latched);
+            } catch (e) {
+                shouldBlockSceneInput = false;
+            }
+        }
+
+        if (this.mouse) this.mouse.uiBlockedByOverlay = shouldBlockSceneInput;
+
         if (this.currentScene) {
             this.currentScene.update(delta);
+        }
+
+        // If tracking is enabled, follow the selected remote camera.
+        this._applyTrackedCursorCamera();
+
+        // Reset block after scene update.
+        if (this.mouse) this.mouse.uiBlockedByOverlay = false;
+
+        // Decrement overlay input latch after scene update so current-frame clicks are consumed.
+        if (this.multiplayerUI && Number(this.multiplayerUI.consumeInputFrames || 0) > 0) {
+            this.multiplayerUI.consumeInputFrames = Math.max(0, Number(this.multiplayerUI.consumeInputFrames || 0) - 1);
         }
     }
 
@@ -374,6 +600,7 @@ class Game {
         if (this.currentScene && this.currentScene.draw) {
             this.currentScene.draw();
         }
+        this._drawMultiplayerUI();
     }
 }
 

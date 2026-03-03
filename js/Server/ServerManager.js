@@ -22,6 +22,9 @@ export default class ServerManager {
         this._tickInterval = null;
         this.sweepValue = 0;
         this.sweepId = null;
+        this.staleRoomMs = 30 * 1000;
+        this.pruneIntervalMs = 5 * 1000;
+        this._lastPruneAt = 0;
 
         this.signals = {
             connected: new Signal(),
@@ -30,12 +33,27 @@ export default class ServerManager {
             error: new Signal(),
             sent: new Signal(),
             fetched: new Signal(),
+            cleanup: new Signal(),
         };
         this._paused = false;
         this._savedListeners = new Map(); // path -> callback (for re-attach on unpause)
     }
 
+    _clearAllListeners() {
+        try {
+            for (const [fullPath, rec] of this.listeners.entries()) {
+                try {
+                    if (rec && rec.unsub && typeof rec.unsub === 'function') rec.unsub();
+                } catch (e) {}
+            }
+        } catch (e) {}
+        try { this.listeners.clear(); } catch (e) {}
+        try { this._savedListeners.clear(); } catch (e) {}
+    }
+
     async createRoom() {
+        // Room switch: detach any previous room subscriptions first.
+        this._clearAllListeners();
         this.roomId = Math.random().toString(36).substring(2, 8);
         this.playerId = "p1";
         await set(ref(this.db, `rooms/${this.roomId}`), {
@@ -48,6 +66,8 @@ export default class ServerManager {
     }
 
     async joinRoom(roomId) {
+        // Room switch: detach any previous room subscriptions first.
+        this._clearAllListeners();
         this.roomId = roomId;
         this.playerId = "p2";
         await update(ref(this.db, `rooms/${roomId}/players/p2`), { connected: true });
@@ -193,6 +213,7 @@ export default class ServerManager {
                     let rel = fullPath;
                     const prefix = `${this.basePath}/${this.roomId}/`;
                     if (fullPath.indexOf(prefix) === 0) rel = fullPath.slice(prefix.length);
+                    else continue; // never reattach listeners from other rooms
                     // call on() to re-register
                     try { this.on(rel, callback); } catch (e) {}
                 } catch (e) {}
@@ -225,6 +246,11 @@ export default class ServerManager {
         if (!this._ensureRoom()) return;
         const fullPath = this._path(path);
         const dbRef = ref(this.db, fullPath);
+        // Replace any existing listener for this exact path.
+        try {
+            const existing = this.listeners.get(fullPath);
+            if (existing && existing.unsub && typeof existing.unsub === 'function') existing.unsub();
+        } catch (e) {}
         // store the callback so we can re-attach after pause/unpause
         this._savedListeners.set(fullPath, callback);
         const listener = onValue(dbRef, (snapshot) => {
@@ -289,6 +315,15 @@ export default class ServerManager {
                     // ignore errors when no room set or update fails
                 }
             }
+
+            // Deterministic stale-room pruning: remove rooms idle > staleRoomMs.
+            try {
+                const now = Date.now();
+                if ((now - this._lastPruneAt) >= this.pruneIntervalMs) {
+                    this._lastPruneAt = now;
+                    this.pruneStaleRooms({ maxAgeMs: this.staleRoomMs, requireNoConnected: true }).catch(()=>{});
+                }
+            } catch (e) {}
         }, intervalMs);
     }
 
@@ -326,6 +361,59 @@ export default class ServerManager {
         } catch (e) {
             this.signals.error.emit(e);
             return null;
+        }
+    }
+
+    _roomHasConnectedPlayers(room) {
+        try {
+            if (!room || typeof room !== 'object') return false;
+            const players = room.players || {};
+            const p1 = !!(players.p1 && players.p1.connected);
+            const p2 = !!(players.p2 && players.p2.connected);
+            return p1 || p2;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Remove stale rooms in a deterministic sweep.
+    // - maxAgeMs: minimum idle age before room is considered stale
+    // - requireNoConnected: when true, only prune rooms with no connected players
+    // - hardDeleteAgeMs: safety valve for rooms with stale "connected=true" flags
+    async pruneStaleRooms({ maxAgeMs = 30 * 1000, requireNoConnected = true, hardDeleteAgeMs = 10 * 60 * 1000 } = {}) {
+        try {
+            const rootRef = ref(this.db, this.basePath);
+            const snapshot = await get(rootRef);
+            if (!snapshot.exists()) return [];
+            const rooms = snapshot.val() || {};
+            const now = Date.now();
+            const deleted = [];
+
+            for (const roomId of Object.keys(rooms)) {
+                if (!roomId) continue;
+                if (this.roomId && roomId === this.roomId) continue; // never delete our active room
+
+                const room = rooms[roomId] || {};
+                const lastActive = Number(room.lastActive || 0);
+                const age = now - lastActive;
+                if (age < maxAgeMs) continue;
+
+                const inUse = this._roomHasConnectedPlayers(room);
+                if (requireNoConnected && inUse && age < hardDeleteAgeMs) continue;
+
+                try {
+                    await set(ref(this.db, `${this.basePath}/${roomId}`), null);
+                    deleted.push(roomId);
+                    try { this.signals.cleanup.emit(roomId); } catch (e) {}
+                } catch (e) {
+                    this.signals.error.emit(e);
+                }
+            }
+
+            return deleted;
+        } catch (e) {
+            this.signals.error.emit(e);
+            return [];
         }
     }
 

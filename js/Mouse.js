@@ -19,6 +19,8 @@ export default class Mouse {
         this.prevDelta = 0;
         this.offset = offset;
         this.canvasScale = new Vector(1,1);
+        this.logicalBounds = new Vector(1920,1080);
+        this.offCanvas = false;
 
         // === Power system ===
         this.power = 0;  // current input context power
@@ -42,6 +44,7 @@ export default class Mouse {
                     e.stopImmediatePropagation();
                 }
             } catch (ex) {}
+            this._onMove(e);
             this._setButton(e.button, 1);
         });
         window.addEventListener("pointerup", e => this._setButton(e.button, 0));
@@ -125,6 +128,19 @@ export default class Mouse {
             (e.clientX - this.rect.left + this.offset.x) * this.scale/this.canvasScale.x,
             (e.clientY - this.rect.top + this.offset.y) * this.scale/this.canvasScale.y
         );
+        this._updateOffCanvasState();
+    }
+
+    _updateOffCanvasState(){
+        try {
+            const w = Number(this.logicalBounds && this.logicalBounds.x) || 1920;
+            const h = Number(this.logicalBounds && this.logicalBounds.y) || 1080;
+            const outside = !(this.pos.x >= 0 && this.pos.y >= 0 && this.pos.x <= w && this.pos.y <= h);
+            this.offCanvas = outside;
+            if (outside) this.pause(0.2);
+        } catch (e) {
+            this.offCanvas = false;
+        }
     }
 
     updateRect(rect) {
@@ -185,6 +201,8 @@ export default class Mouse {
     }
 
     pressed(button = null) {
+        if (this.offCanvas) return false;
+        if (this.uiBlockedByOverlay) return false;
         if (button === null || button === 'any') {
             return this.pressed("left") || this.pressed("middle") || this.pressed("right");
         }
@@ -195,6 +213,8 @@ export default class Mouse {
     }
 
     held(button, returnTime = false) {
+        if (this.offCanvas) return returnTime ? 0 : false;
+        if (this.uiBlockedByOverlay) return returnTime ? 0 : false;
         if (this.pauseTime > 0) return returnTime ? 0 : false;
         if (!this._allowed()) return returnTime ? 0 : false;
         const b = this.buttons[button];
@@ -202,6 +222,8 @@ export default class Mouse {
     }
 
     released(button) {
+        if (this.offCanvas) return false;
+        if (this.uiBlockedByOverlay) return false;
         if (this.pauseTime > 0) return false;
         if (!this._allowed()) return false;
         return !!this.buttons[button].justReleased;
@@ -216,6 +238,7 @@ export default class Mouse {
     }
 
     scroll(mode = null, returnBool = false) {
+        if (this.uiBlockedByOverlay) return returnBool ? false : 0;
         if (!this._allowed()) return returnBool ? false : 0;
         let delta = this._lastScroll;
         if (mode === "up" && delta >= 0) delta = 0;
@@ -229,6 +252,7 @@ export default class Mouse {
      * mode: 'up'|'down' filters by direction like scroll().
      */
     wheel(mode = null, returnBool = false, requireCtrl = false) {
+        if (this.uiBlockedByOverlay) return returnBool ? false : 0;
         if (!this._allowed()) return returnBool ? false : 0;
         let delta = this._lastWheel || 0;
         if (requireCtrl && !this._lastWheelCtrlFlag) delta = 0;
@@ -243,6 +267,7 @@ export default class Mouse {
      * If requireCtrl=true, only returns value when wheel event had ctrl pressed.
      */
     wheelX(mode = null, returnBool = false, requireCtrl = false) {
+        if (this.uiBlockedByOverlay) return returnBool ? false : 0;
         if (!this._allowed()) return returnBool ? false : 0;
         let delta = this._lastWheelX || 0;
         if (requireCtrl && !this._lastWheelCtrlFlag) delta = 0;

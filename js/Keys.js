@@ -21,12 +21,13 @@ export default class Keys { // Key input
         window.addEventListener("keydown", e => {
             if (shouldIgnore(e)) return; // ignore global shortcuts while debug input focused
             // prevent browser interfering with shortcuts
+            //e.preventDefault();
+            if(e.key === "'") e.preventDefault();
             if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
                 e.preventDefault();
                 e.stopPropagation();
             }
             if (e.key === " " || (e.altKey)) {
-                e.preventDefault();
             }
             if (e.key === "/") {
                 e.preventDefault();
@@ -145,6 +146,32 @@ export default class Keys { // Key input
         }
         const k = this.keys[key];
         return (k && k.state) ? (returnTime ? k.time : true) : (returnTime ? 0 : false);
+    }
+
+    // Return keys that were pressed on this frame (same semantics as pressed()).
+    getKeysPressed(passcode = "") {
+        if (window.Debug.visible) return [];
+        if (passcode !== this.passcode) return [];
+        if (this.pauseTime > 0) return [];
+        const delta = this.lastDelta || 0;
+        const out = [];
+        for (const k in this.keys) {
+            const key = this.keys[k];
+            if (key && key.state && Math.abs(key.time - delta) < 1e-6) out.push(k);
+        }
+        return out;
+    }
+
+    // Return keys that are currently held down.
+    getKeysHeld(passcode = "") {
+        if (window.Debug.visible) return [];
+        if (passcode !== this.passcode) return [];
+        if (this.pauseTime > 0) return [];
+        const out = [];
+        for (const k in this.keys) {
+            if (this.keys[k] && this.keys[k].state) out.push(k);
+        }
+        return out;
     }
 
     comboPressed(keysArray,passcode="") {

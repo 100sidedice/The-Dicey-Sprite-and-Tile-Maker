@@ -83,6 +83,9 @@ export class SpriteScene extends Scene {
             const pickerPos = new Vector(208, 1040);
             const pickerSize = new Vector(40, 28);
             const colorInput = createHInput('pen-color', pickerPos, pickerSize, 'color', { borderRadius: '4px', border: '1px solid #444', padding: '2px' }, 'UI');
+            // Make picker 2x bigger from its bottom-left corner.
+            colorInput.style.transformOrigin = '0% 100%';
+            colorInput.style.transform = 'scale(2)';
             colorInput.value = this.penColor || '#000000';
             colorInput.title = 'Pen color';
             colorInput.addEventListener('input', (e) => {
@@ -91,6 +94,15 @@ export class SpriteScene extends Scene {
                     else this.penColor = e.target.value;
                 } catch (ee) {}
             });
+            // Prevent mouse bleed into JS UI while hovering the DOM color picker.
+            const pauseMouseForPicker = () => {
+                try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.2); } catch (e) {}
+            };
+            colorInput.addEventListener('mouseenter', pauseMouseForPicker);
+            colorInput.addEventListener('mousemove', pauseMouseForPicker);
+            colorInput.addEventListener('pointerenter', pauseMouseForPicker);
+            colorInput.addEventListener('pointermove', pauseMouseForPicker);
+            colorInput.addEventListener('focus', pauseMouseForPicker);
             // small label to the right of the picker
             const label = document.createElement('div');
             label.textContent = '';
@@ -968,9 +980,25 @@ export class SpriteScene extends Scene {
             return null;
         });
 
+        // Temporary debug helper: clear all rooms from firebase.
+        window.Debug.createSignal('clearserver', async () => {
+            try {
+                if (!this.server || typeof this.server.clearAllRooms !== 'function') return false;
+                await this.server.clearAllRooms();
+                try { console.log('clearserver: removed all rooms'); } catch (e) {}
+                return true;
+            } catch (e) {
+                try { console.warn('clearserver failed', e); } catch (er) {}
+                return false;
+            }
+        });
+
         // Debug: show multiplayer menu (hidden by default). Call via Debug signal to unhide.
         window.Debug.createSignal('enableColab', () => {
             try {
+                if (typeof window.showMultiplayerMenu === 'function') {
+                    return !!window.showMultiplayerMenu();
+                }
                 const el = document.getElementById('multiplayer-menu');
                 if (el) {
                     el.style.display = 'flex';
@@ -6750,6 +6778,10 @@ export class SpriteScene extends Scene {
                                 y: Number(c.y || 0),
                                 time: Number(c.time || Date.now()),
                                 client: cid,
+                                zx: Number.isFinite(Number(c.zx)) ? Number(c.zx) : null,
+                                zy: Number.isFinite(Number(c.zy)) ? Number(c.zy) : null,
+                                ox: Number.isFinite(Number(c.ox)) ? Number(c.ox) : null,
+                                oy: Number.isFinite(Number(c.oy)) ? Number(c.oy) : null,
                                 tm: Number(c.tm || 0),
                                 inside: Number(c.in || 0),
                                 renderOnly: Number(c.ro || 0),
@@ -7491,6 +7523,10 @@ export class SpriteScene extends Scene {
             if (!this.mouse || !this.mouse.pos) return;
             const pos = this.mouse.pos;
             const payload = { x: Number(pos.x || 0), y: Number(pos.y || 0), time: Date.now(), client: this.clientId };
+            payload.zx = Number(this.zoom?.x || 1);
+            payload.zy = Number(this.zoom?.y || 1);
+            payload.ox = Number(this.offset?.x || 0);
+            payload.oy = Number(this.offset?.y || 0);
             const p = this.getPos(pos);
             payload.tm = this.tilemode ? 1 : 0;
             payload.in = (p && p.inside) ? 1 : 0;
@@ -7610,6 +7646,14 @@ export class SpriteScene extends Scene {
                 worldY = tileWorldY + startPy * cellWorldH;
                 worldW = cellWorldW * brush;
                 worldH = cellWorldH * brush;
+            } else if (Number(entry.tm) === 1) {
+                // In render-only tilemode there may be no pixel coords; use brush size as tile footprint.
+                const brushTiles = Math.max(1, Math.min(64, Number(entry.bs) || 1));
+                const halfTiles = Math.floor((brushTiles - 1) / 2);
+                worldX = tileWorldX - halfTiles * base.size.x;
+                worldY = tileWorldY - halfTiles * base.size.y;
+                worldW = base.size.x * brushTiles;
+                worldH = base.size.y * brushTiles;
             }
 
             const screenX = (worldX + offX) * zoomX;
@@ -8478,6 +8522,19 @@ export class SpriteScene extends Scene {
                         const rectPos = new Vector(target.x, target.y);
                         const rectSize = new Vector(target.w, target.h);
                         this.UIDraw.rect(rectPos, rectSize, curStroke, false, true, 2, curStroke);
+                        try {
+                            const cx = target.x + target.w * 0.5;
+                            const cy = target.y + target.h * 0.5;
+                            const inView = (cx >= 0 && cy >= 0 && cx <= 1920 && cy <= 1080);
+                            if (!inView) {
+                                const mx = Math.max(6, Math.min(1914, cx));
+                                const my = Math.max(6, Math.min(1074, cy));
+                                const mpos = new Vector(mx - 5, my - 5);
+                                const msize = new Vector(10, 10);
+                                this.UIDraw.rect(mpos, msize, curStroke, true);
+                                this.UIDraw.rect(mpos, msize, '#00000000', false, true, 1, '#FFFFFFFF');
+                            }
+                        } catch (e) {}
                         if (entry.name) this.UIDraw.text(entry.name, new Vector(rectPos.x + rectSize.x + 5, rectPos.y - 4), '#FFFFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' });
                         if (target.label) this.UIDraw.text(target.label, new Vector(rectPos.x + rectSize.x + 5, rectPos.y + rectSize.y + 10), '#FFFFFFFF', 0, 11, { align: 'left', baseline: 'middle', font: 'monospace' });
                     }

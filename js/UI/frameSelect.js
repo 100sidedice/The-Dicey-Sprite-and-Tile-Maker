@@ -75,6 +75,23 @@ export default class FrameSelect {
         return base + i;
     }
 
+    _ensureAnimationListed(animName){
+        try {
+            const name = (typeof animName === 'string') ? animName.trim() : '';
+            if (!name || !this.sprite) return false;
+            if (!this.sprite._frames) this.sprite._frames = new Map();
+            if (this.sprite._frames.has(name)) return true;
+            this.sprite._frames.set(name, []);
+            if (this.sprite.animations && typeof this.sprite.animations.set === 'function' && !this.sprite.animations.has(name)) {
+                const row = Math.max(0, this._getAnimationNames().indexOf(name));
+                this.sprite.animations.set(name, { row, frameCount: 0 });
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _normalizeOpenConnKey(key){
         let bits = String(key || '00000000').replace(/[^01]/g, '');
         while (bits.length < 8) bits += '0';
@@ -281,9 +298,20 @@ export default class FrameSelect {
         if (!this.sprite) return;
         if (!this.sprite._frames) this.sprite._frames = new Map();
         const newName = this._uniqueAnimName('anim');
-        this.sprite._frames.set(newName, []);
-        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-        if (this.scene) this.scene.selectedAnimation = newName;
+        if (typeof this.sprite.addAnimation === 'function') {
+            // Register animation metadata first so collaborative sync sees creation.
+            const row = this._getAnimationNames().length;
+            this.sprite.addAnimation(newName, row, 0);
+        }
+        // Ensure the sidebar list has the animation immediately.
+        this._ensureAnimationListed(newName);
+        // Push one starter frame so remote peers receive a structural frame op and stay in sync.
+        if (typeof this.sprite.insertFrame === 'function') this.sprite.insertFrame(newName, 0);
+        else this.sprite._frames.set(newName, [document.createElement('canvas')]);
+        if (this.scene) {
+            this.scene.selectedAnimation = newName;
+            this.scene.selectedFrame = 0;
+        }
         // spawn text input to rename immediately
         this._spawnTextInputFor(newName);
     }
@@ -305,13 +333,20 @@ export default class FrameSelect {
     removeAnimation(name){
         if (!this.sprite || !this.sprite._frames) return false;
         if (!this.sprite._frames.has(name)) return false;
-        this.sprite._frames.delete(name);
-        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+        if (typeof this.sprite.removeAnimation === 'function') this.sprite.removeAnimation(name);
+        else {
+            this.sprite._frames.delete(name);
+            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+        }
+        try {
+            if (this.sprite._frameGroups && typeof this.sprite._frameGroups.delete === 'function') this.sprite._frameGroups.delete(name);
+        } catch (e) {}
         // adjust selection
         const names = this._getAnimationNames();
         if (this.scene){
             if (names.length > 0) this.scene.selectedAnimation = names[0];
             else this.scene.selectedAnimation = 'idle';
+            this.scene.selectedFrame = 0;
         }
         return true;
     }
@@ -1081,6 +1116,7 @@ export default class FrameSelect {
                         } catch (e) { console.warn('Group click failed', e); }
                     } else if (item.type === 'add'){
                         if (typeof this.sprite.insertFrame === 'function') {
+                            this._ensureAnimationListed(anim);
                             this.sprite.insertFrame(anim);
                             if (this.scene) this.scene.selectedFrame = framesArr.length;
                             if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
@@ -1197,6 +1233,7 @@ export default class FrameSelect {
                         try {
                             if (typeof this.sprite.insertFrame === 'function') {
                                 // insertFrame without index appends a new logical frame
+                                this._ensureAnimationListed(anim);
                                 this.sprite.insertFrame(anim);
                                 // compute logical index of the last frame (newly appended)
                                 const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
@@ -1327,6 +1364,7 @@ export default class FrameSelect {
                                         const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
                                         if (!src) continue;
                                         if (typeof this.sprite.insertFrame === 'function') {
+                                            this._ensureAnimationListed(anim);
                                             this.sprite.insertFrame(anim); // append new blank frame
                                             // compute logical index of new last frame
                                             const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
@@ -1386,6 +1424,7 @@ export default class FrameSelect {
                                     try {
                                         const src = this.sprite.getFrame(anim, sel);
                                         if (src && typeof this.sprite.insertFrame === 'function') {
+                                            this._ensureAnimationListed(anim);
                                             this.sprite.insertFrame(anim); // append new blank frame
                                             // compute logical index of new last frame
                                             const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
