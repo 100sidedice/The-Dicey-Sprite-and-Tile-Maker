@@ -280,6 +280,36 @@ export class SpriteScene extends Scene {
                         }
                     } catch (e) { /* ignore tile layout restore errors */ }
 
+                    // Restore sprite entities/state if present.
+                    try {
+                        const incomingSpriteLayer = (meta && meta.spriteLayer && typeof meta.spriteLayer === 'object') ? meta.spriteLayer : null;
+                        if (incomingSpriteLayer) {
+                            const layer = this._normalizeSpriteLayerState();
+                            if (layer) {
+                                layer.selectedAnimation = incomingSpriteLayer.selectedAnimation || null;
+                                layer.selectedEntityId = incomingSpriteLayer.selectedEntityId || null;
+                                layer.nextEntityId = Math.max(1, Number(incomingSpriteLayer.nextEntityId) || 1);
+                                layer.entities = (incomingSpriteLayer.entities && typeof incomingSpriteLayer.entities === 'object')
+                                    ? JSON.parse(JSON.stringify(incomingSpriteLayer.entities))
+                                    : {};
+                                layer.order = Array.isArray(incomingSpriteLayer.order)
+                                    ? incomingSpriteLayer.order.slice()
+                                    : Object.keys(layer.entities || {});
+                                layer.animationProfiles = (incomingSpriteLayer.animationProfiles && typeof incomingSpriteLayer.animationProfiles === 'object')
+                                    ? JSON.parse(JSON.stringify(incomingSpriteLayer.animationProfiles))
+                                    : {};
+                                layer.clipboard = incomingSpriteLayer.clipboard
+                                    ? JSON.parse(JSON.stringify(incomingSpriteLayer.clipboard))
+                                    : null;
+
+                                if (layer.selectedEntityId && !layer.entities[layer.selectedEntityId]) layer.selectedEntityId = null;
+                                this.selectedSpriteAnimation = layer.selectedAnimation;
+                                this.selectedSpriteEntityId = layer.selectedEntityId;
+                                this.spriteClipboard = layer.clipboard || null;
+                            }
+                        }
+                    } catch (e) { /* ignore sprite layer restore errors */ }
+
                     // Reconstruct frames from saved per-frame images
                     if (!this.currentSprite || !this.currentSprite._frames) return;
                     const animNames = Object.keys(meta.animations || {});
@@ -1712,6 +1742,68 @@ export class SpriteScene extends Scene {
         return;
     }
 
+    _startCameraOffsetTween(targetOffset, durationSec = 0.28, targetZoom = null) {
+        try {
+            const target = (targetOffset && typeof targetOffset.x === 'number' && typeof targetOffset.y === 'number')
+                ? targetOffset
+                : new Vector(0, 0);
+            const current = this.offset && typeof this.offset.clone === 'function'
+                ? this.offset.clone()
+                : new Vector((this.offset && this.offset.x) || 0, (this.offset && this.offset.y) || 0);
+            const zoomCurrent = this.zoom && typeof this.zoom.clone === 'function'
+                ? this.zoom.clone()
+                : new Vector((this.zoom && this.zoom.x) || 1, (this.zoom && this.zoom.y) || 1);
+            const zoomTarget = (targetZoom && typeof targetZoom.x === 'number' && typeof targetZoom.y === 'number')
+                ? targetZoom
+                : zoomCurrent;
+            const dur = Math.max(0.05, Number(durationSec) || 0.28);
+            this._cameraOffsetTween = {
+                start: current,
+                end: new Vector(target.x, target.y),
+                zoomStart: new Vector(zoomCurrent.x, zoomCurrent.y),
+                zoomEnd: new Vector(zoomTarget.x, zoomTarget.y),
+                elapsed: 0,
+                duration: dur
+            };
+            if (this.panVlos) {
+                this.panVlos.x = 0;
+                this.panVlos.y = 0;
+            }
+            if (this.zoomVlos) {
+                this.zoomVlos.x = 0;
+                this.zoomVlos.y = 0;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _applyCameraOffsetTween(dt) {
+        try {
+            const tween = this._cameraOffsetTween;
+            if (!tween) return;
+            const delta = Math.max(0, Number(dt) || 0);
+            tween.elapsed += delta;
+            const t = Math.max(0, Math.min(1, tween.elapsed / Math.max(0.0001, tween.duration)));
+            const eased = 1 - Math.pow(1 - t, 3);
+            this.offset.x = tween.start.x + (tween.end.x - tween.start.x) * eased;
+            this.offset.y = tween.start.y + (tween.end.y - tween.start.y) * eased;
+            if (tween.zoomStart && tween.zoomEnd && this.zoom) {
+                this.zoom.x = tween.zoomStart.x + (tween.zoomEnd.x - tween.zoomStart.x) * eased;
+                this.zoom.y = tween.zoomStart.y + (tween.zoomEnd.y - tween.zoomStart.y) * eased;
+            }
+            if (this.panVlos) {
+                this.panVlos.x = 0;
+                this.panVlos.y = 0;
+            }
+            if (this.zoomVlos) {
+                this.zoomVlos.x = 0;
+                this.zoomVlos.y = 0;
+            }
+            if (t >= 1) this._cameraOffsetTween = null;
+        } catch (e) {
+            this._cameraOffsetTween = null;
+        }
+    }
+
     _handleSpriteEntityInteractions() {
         try {
             if (!this.tilemode || !this.mouse || !this.keys) {
@@ -1733,18 +1825,6 @@ export class SpriteScene extends Scene {
             const hitId = this._hitTestSpriteEntityAt(col, row);
             this._spriteHoverEntityId = hitId;
 
-            const placementActive = !!this.selectedSpriteAnimation;
-            const hasNoModifiers = !this.keys.held('Shift') && !this.keys.held('Control') && !this.keys.held('Alt');
-            const leftDown = this.mouse.pressed('left') || this.mouse.held('left');
-
-            // While in sprite placement mode, absorb left press/hold over valid tile cells
-            // so tile paint/bind tools do not run in the same click.
-            if (placementActive && hasNoModifiers && leftDown) {
-                this._spriteInteractionMaskUntil = Date.now() + 180;
-                try { this.mouse.addMask(1); } catch (e) {}
-                return true;
-            }
-
             // Absorb click/drag intent while cursor is over a sprite so tile tools don't also fire.
             if (hitId && (this.mouse.pressed('left') || this.mouse.held('left'))) {
                 this._spriteInteractionMaskUntil = Date.now() + 160;
@@ -1765,7 +1845,7 @@ export class SpriteScene extends Scene {
 
             const anim = this.selectedSpriteAnimation || null;
             if (!anim) return false;
-            this._activateTile(col, row, true);
+            this._deactivateTile(col, row, true);
             const created = this._addSpriteEntityAt(col, row, anim, true);
             if (!created) return false;
             this.modifyState(created.id, false, false, ['spriteLayer', 'selectedEntityId']);
@@ -1822,8 +1902,7 @@ export class SpriteScene extends Scene {
         } catch (e) { /* ignore selection keyframe apply errors */ }
         const posForShortcutKeys = this.getPos(this.mouse && this.mouse.pos);
         const renderOnlyTile = !!(this.tilemode && posForShortcutKeys && posForShortcutKeys.renderOnly);
-        this._spriteInputConsumedThisTick = false;
-        try { this._spriteInputConsumedThisTick = !!this._handleSpriteEntityInteractions(); } catch (e) { this._spriteInputConsumedThisTick = false; }
+        try { this._handleSpriteEntityInteractions(); } catch (e) {}
         // handle numeric keys to change brush size (1..5). If multiple number keys are pressed simultaneously,
         // sum them for larger brushes (e.g., 2+3 => size 5, 1+2+3+4+5 => size 15). Max capped at 15.
         // Holding Shift while pressing number keys captures the current selection into the clipboard and
@@ -2060,8 +2139,24 @@ export class SpriteScene extends Scene {
         if (this.keys.released('t') || this.keys.released('T')) {
             const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
             if (!shiftHeld) {
-                if (this.stateController) this.stateController.toggleTilemode();
-                else this.tilemode = !this.tilemode;
+                const wasTilemode = !!this.tilemode;
+                const nextTilemode = !wasTilemode;
+                if (this.stateController) this.stateController.setTilemode(nextTilemode);
+                else this.tilemode = nextTilemode;
+
+                if (nextTilemode) {
+                    const restore = (this._tilemodeSavedOffset && typeof this._tilemodeSavedOffset.x === 'number' && typeof this._tilemodeSavedOffset.y === 'number')
+                        ? this._tilemodeSavedOffset
+                        : new Vector((this.offset && this.offset.x) || 0, (this.offset && this.offset.y) || 0);
+                    const restoreZoom = (this._tilemodeSavedZoom && typeof this._tilemodeSavedZoom.x === 'number' && typeof this._tilemodeSavedZoom.y === 'number')
+                        ? this._tilemodeSavedZoom
+                        : new Vector((this.zoom && this.zoom.x) || 1, (this.zoom && this.zoom.y) || 1);
+                    this._startCameraOffsetTween(new Vector(restore.x, restore.y), 1, new Vector(restoreZoom.x, restoreZoom.y));
+                } else {
+                    this._tilemodeSavedOffset = this.offset.clone();
+                    this._tilemodeSavedZoom = this.zoom.clone();
+                    this._startCameraOffsetTween(new Vector(0, 0), 1, new Vector(1, 1));
+                }
             } else {
                 try {
                     const defCols = Math.max(1, (this.tileCols|0) || 3);
@@ -2158,6 +2253,9 @@ export class SpriteScene extends Scene {
                 } catch (e) {
                     console.warn('pan integration failed', e);
                 }
+
+                // Smoothly transition camera offset for tilemode enter/exit toggles.
+                this._applyCameraOffsetTween(dt);
             } catch (e) {
                 console.warn('zoom integration failed', e);
             }
@@ -2331,12 +2429,9 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) { /* ignore mirror toggle errors */ }
 
-                // tools (pen/selection) operate during ticks unless sprite interaction consumed this input.
-                const spriteMaskActive = !!(this._spriteInteractionMaskUntil && Date.now() < this._spriteInteractionMaskUntil);
-                if (!this._spriteInputConsumedThisTick && !spriteMaskActive) {
-                    this.selectionTool && this.selectionTool();
-                    this.penTool && this.penTool();
-                }
+                // tools (pen) operate during ticks
+                this.selectionTool && this.selectionTool();
+                this.penTool && this.penTool();
             // Throttle cursor sends when mouse moves
             try {
                 const mp = (this.mouse && this.mouse.pos) ? this.mouse.pos : null;
@@ -3987,6 +4082,7 @@ export class SpriteScene extends Scene {
                                 cx.drawImage(img,0,0);
                                 const imgd = cx.getImageData(0,0,c.width,c.height);
                                 this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: { ox: 0, oy: 0 } };
+                                this._activeClipboardType = 'pixel';
                                 applyPaste();
                                 return;
                             } catch (e) {
@@ -4011,12 +4107,14 @@ export class SpriteScene extends Scene {
                                         cx.drawImage(img,0,0);
                                         const imgd = cx.getImageData(0,0,c.width,c.height);
                                         this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: obj.originOffset || { ox: 0, oy: 0 } };
+                                        this._activeClipboardType = 'pixel';
                                         applyPaste();
                                         return;
                                     } catch (e) { /* ignore */ }
                                 } else {
                                     // Points or already-structured image payload (dense numeric array) may be large; trust JSON
                                     this.clipboard = obj;
+                                    this._activeClipboardType = 'pixel';
                                     applyPaste();
                                     return;
                                 }
@@ -4053,18 +4151,32 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('v')) {
                     // paste at mouse position (tiles or pixels)
                     const posInfo = this.getPos(this.mouse && this.mouse.pos);
-                    const allowSpritePaste = !!(this.tilemode && posInfo && (posInfo.renderOnly || posInfo.inside) && (this.spriteClipboard || this._spriteClipboard));
-                    const allowTilePaste = !!(this.tilemode && posInfo && posInfo.renderOnly && this._tileClipboard);
-                    if (allowSpritePaste) {
+                    const activeType = this._activeClipboardType;
+                    const hasSprite = !!(this.spriteClipboard || this._spriteClipboard);
+                    const hasTile = !!this._tileClipboard;
+                    const hasPixel = !!this.clipboard;
+                    const canPasteSprite = !!(this.tilemode && posInfo && (posInfo.renderOnly || posInfo.inside) && hasSprite);
+                    const canPasteTile = !!(this.tilemode && posInfo && posInfo.renderOnly && hasTile);
+                    const canPastePixel = !!(posInfo && posInfo.inside && hasPixel);
+                    let pasted = false;
+                    if (activeType === 'sprite' && canPasteSprite) {
                         this.doPaste(this.mouse && this.mouse.pos);
-                        this._justPasted = true;
-                    } else if (allowTilePaste) {
+                        pasted = true;
+                    } else if (activeType === 'tile' && canPasteTile) {
                         this.doPaste(this.mouse && this.mouse.pos);
-                        this._justPasted = true;
-                    } else if (this.clipboard) {
+                        pasted = true;
+                    } else if (activeType === 'pixel' && canPastePixel) {
                         this.doPaste(this.mouse && this.mouse.pos);
+                        pasted = true;
+                    } else if (!activeType) {
+                        if (canPasteSprite || canPasteTile || canPastePixel) {
+                            this.doPaste(this.mouse && this.mouse.pos);
+                            pasted = true;
+                        }
+                    }
+                    if (pasted) {
                         this._justPasted = true;
-                    } else {
+                    } else if (!hasSprite && !hasTile && !hasPixel) {
                         // No local data yet: pull from system clipboard and paste once ready.
                         fetchSystemClipboard(true);
                     }
@@ -4679,14 +4791,15 @@ export class SpriteScene extends Scene {
             // to pick a new origin inside the clipboard. We freeze the preview placement on
             // initial press so subsequent mouse movement moves the origin relative to that frozen preview.
             try {
-                if (this.clipboardPreview && this.clipboard) {
+                const activeType = this._activeClipboardType;
+                if (this.clipboardPreview && this.clipboard && (!activeType || activeType === 'pixel')) {
                     const cb = this.clipboard;
                     // start dragging (freeze) on initial press
                     if (this.mouse.pressed('left') && !this._clipboardPreviewDragging) {
                         const posInfo = this.getPos(this.mouse.pos);
                         if (posInfo && posInfo.inside) {
-                            const ox = (cb.originOffset && typeof cb.originOffset.ox === 'number') ? cb.originOffset.ox : 0;
-                            const oy = (cb.originOffset && typeof cb.originOffset.oy === 'number') ? cb.originOffset.oy : 0;
+                            const ox = (cb.originOffset && Number.isFinite(cb.originOffset.ox)) ? cb.originOffset.ox : 0;
+                            const oy = (cb.originOffset && Number.isFinite(cb.originOffset.oy)) ? cb.originOffset.oy : 0;
                             const topLeftX = posInfo.x - ox;
                             const topLeftY = posInfo.y - oy;
                             this._clipboardPreviewDragging = { topLeftX, topLeftY, w: cb.w, h: cb.h };
@@ -6222,6 +6335,28 @@ export class SpriteScene extends Scene {
                     meta.tileLayout = layout;
                 } catch (e) { /* ignore tile layout save errors */ }
 
+                // Persist sprite entities/state for reload recovery.
+                try {
+                    const layer = this._normalizeSpriteLayerState();
+                    if (layer) {
+                        const entities = {};
+                        for (const id of Object.keys(layer.entities || {})) {
+                            const entry = layer.entities[id];
+                            if (!entry) continue;
+                            entities[id] = { ...entry };
+                        }
+                        meta.spriteLayer = {
+                            selectedAnimation: layer.selectedAnimation || null,
+                            selectedEntityId: layer.selectedEntityId || null,
+                            nextEntityId: Math.max(1, Number(layer.nextEntityId) || 1),
+                            entities,
+                            order: Array.isArray(layer.order) ? layer.order.slice() : Object.keys(entities),
+                            animationProfiles: JSON.parse(JSON.stringify(layer.animationProfiles || {})),
+                            clipboard: layer.clipboard ? JSON.parse(JSON.stringify(layer.clipboard)) : null
+                        };
+                    }
+                } catch (e) { /* ignore sprite layer save errors */ }
+
                 try { this.saver.set('sprites_meta/' + keyName, meta); } catch (e) {}
                 return true;
             } catch (e) {
@@ -6248,6 +6383,7 @@ export class SpriteScene extends Scene {
                 };
                 this.spriteClipboard = payload;
                 this._spriteClipboard = payload;
+                this._activeClipboardType = 'sprite';
                 return;
             }
             const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
@@ -6278,6 +6414,7 @@ export class SpriteScene extends Scene {
                         originOffsetTile,
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
+                    this._activeClipboardType = 'tile';
                 }
                 return;
             }
@@ -6302,6 +6439,28 @@ export class SpriteScene extends Scene {
                     frameIdx = Number(binding.index);
                 }
             }
+
+            const resolvePixelClipboardOriginOffset = (minX, minY, maxX, maxY, areaIndexHint = null) => {
+                try {
+                    const pos = this.getPos(this.mouse && this.mouse.pos);
+                    const hasLocal = !!(pos && pos.inside && Number.isFinite(pos.x) && Number.isFinite(pos.y));
+                    const areaMatches = !this.tilemode || areaIndexHint === null || areaIndexHint === undefined || (pos && pos.areaIndex === areaIndexHint);
+                    let candidateX = Number.isFinite(minX) ? minX : 0;
+                    let candidateY = Number.isFinite(minY) ? minY : 0;
+                    if (hasLocal && areaMatches) {
+                        candidateX = pos.x;
+                        candidateY = pos.y;
+                    }
+                    const originX = Math.max(minX, Math.min(maxX, candidateX));
+                    const originY = Math.max(minY, Math.min(maxY, candidateY));
+                    return {
+                        ox: originX - minX,
+                        oy: originY - minY
+                    };
+                } catch (e) {
+                    return { ox: 0, oy: 0 };
+                }
+            };
 
             // If there are explicit selection points, copy those pixels
             if (this.selectionPoints && this.selectionPoints.length > 0) {
@@ -6328,11 +6487,12 @@ export class SpriteScene extends Scene {
                     }
                 }
                 // Determine origin from current mouse pixel pos (clamped into bbox)
-                const mpos = this.getPos(this.mouse && this.mouse.pos) || { x: minX, y: minY };
-                const originX = Math.max(minX, Math.min(maxX, mpos.x));
-                const originY = Math.max(minY, Math.min(maxY, mpos.y));
-                const originOffset = { ox: originX - minX, oy: originY - minY };
+                const pointsAreaIndex = (this.tilemode && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.selectionPoints[0].areaIndex === 'number')
+                    ? this.selectionPoints[0].areaIndex
+                    : sourceAreaIndex;
+                const originOffset = resolvePixelClipboardOriginOffset(minX, minY, maxX, maxY, pointsAreaIndex);
                 this.clipboard = { type: 'points', w, h, pixels, originOffset };
+                this._activeClipboardType = 'pixel';
                 // Attempt to also place a transferable representation on the system clipboard
                 if (!localOnly) {
                     try {
@@ -6373,11 +6533,10 @@ export class SpriteScene extends Scene {
             const ctx = frameCanvas.getContext('2d');
             const img = ctx.getImageData(minX, minY, w, h);
             // Determine origin from current mouse pixel pos (clamped into region)
-            const mpos = this.getPos(this.mouse && this.mouse.pos) || { x: minX, y: minY };
-            const originX = Math.max(minX, Math.min(maxX, mpos.x));
-            const originY = Math.max(minY, Math.min(maxY, mpos.y));
-            const originOffset = { ox: originX - minX, oy: originY - minY };
+            const regionAreaIndex = (this.tilemode && sr && typeof sr.areaIndex === 'number') ? sr.areaIndex : sourceAreaIndex;
+            const originOffset = resolvePixelClipboardOriginOffset(minX, minY, maxX, maxY, regionAreaIndex);
             this.clipboard = { type: 'image', w, h, data: img.data, originOffset };
+            this._activeClipboardType = 'pixel';
             // Attempt to also place a transferable representation on the system clipboard (data URL wrapped in JSON)
             if (!localOnly) {
                 try {
@@ -6435,6 +6594,7 @@ export class SpriteScene extends Scene {
                     this._tileClipboard = {
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
+                    this._activeClipboardType = 'tile';
                 }
                 this._tileSelection = new Set();
                 return;
@@ -6519,7 +6679,8 @@ export class SpriteScene extends Scene {
             if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
 
             const spriteClip = this.spriteClipboard || this._spriteClipboard || null;
-            if (this.tilemode && spriteClip && spriteClip.type === 'sprite-entity') {
+            const activeType = this._activeClipboardType;
+            if ((activeType === 'sprite' || (!activeType && !this._tileClipboard && !this.clipboard)) && this.tilemode && spriteClip && spriteClip.type === 'sprite-entity') {
                 if (Number.isFinite(Number(pos.tileCol)) && Number.isFinite(Number(pos.tileRow))) {
                     const col = Number(pos.tileCol) | 0;
                     const row = Number(pos.tileRow) | 0;
@@ -6554,12 +6715,12 @@ export class SpriteScene extends Scene {
             }
 
             // Tile clipboard paste in render-only tilemode
-            if (this.tilemode && pos.renderOnly && this._tileClipboard) {
+            if ((activeType === 'tile' || (!activeType && !!this._tileClipboard && !this.clipboard)) && this.tilemode && pos.renderOnly && this._tileClipboard) {
                 const tiles = Array.isArray(this._tileClipboard.tiles) && this._tileClipboard.tiles.length > 0
                     ? this._tileClipboard.tiles
                     : (this._tileClipboard.binding ? [{ dc:0, dr:0, binding: this._tileClipboard.binding, transform: this._tileClipboard.transform }] : []);
                 // honor originOffsetTile so mouse position maps to that origin when pasting
-                const origin = (this._tileClipboard.originOffsetTile && typeof this._tileClipboard.originOffsetTile.ox === 'number')
+                const origin = (this._tileClipboard.originOffsetTile && Number.isFinite(this._tileClipboard.originOffsetTile.ox) && Number.isFinite(this._tileClipboard.originOffsetTile.oy))
                     ? this._tileClipboard.originOffsetTile : { ox: 0, oy: 0 };
                 const baseCol = col - (origin.ox|0);
                 const baseRow = row - (origin.oy|0);
@@ -6574,10 +6735,11 @@ export class SpriteScene extends Scene {
                 return;
             }
 
+            if (activeType && activeType !== 'pixel') return;
             if (!this.clipboard) return;
 
-            const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
-            const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
+            const ox = (this.clipboard.originOffset && Number.isFinite(this.clipboard.originOffset.ox)) ? this.clipboard.originOffset.ox : 0;
+            const oy = (this.clipboard.originOffset && Number.isFinite(this.clipboard.originOffset.oy)) ? this.clipboard.originOffset.oy : 0;
             const targetLocalX = pos.x - ox;
             const targetLocalY = pos.y - oy;
             const targetWorldX = col * slice + targetLocalX;
@@ -6672,8 +6834,8 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
-            const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
+            const ox = (this.clipboard.originOffset && Number.isFinite(this.clipboard.originOffset.ox)) ? this.clipboard.originOffset.ox : 0;
+            const oy = (this.clipboard.originOffset && Number.isFinite(this.clipboard.originOffset.oy)) ? this.clipboard.originOffset.oy : 0;
             const targetLocalX = pos.x - ox;
             const targetLocalY = pos.y - oy;
             const targetWorldX = col * slice + targetLocalX;
@@ -9770,15 +9932,15 @@ export class SpriteScene extends Scene {
             }
 
             // Draw clipboard preview (Alt+C) aligned so clipboard origin matches mouse pixel
-            if (this.clipboardPreview && this.clipboard) {
+            if (this.clipboardPreview && this.clipboard && (!this._activeClipboardType || this._activeClipboardType === 'pixel')) {
                 try {
                     const cb = this.clipboard;
                     // mouse position in frame coords
                     const posInfo = posInfoGlobal;
                     if (!posInfo || !posInfo.inside) return;
                     // determine frozen placement if dragging, otherwise compute placement aligning origin under mouse
-                    const ox = (cb.originOffset && typeof cb.originOffset.ox === 'number') ? cb.originOffset.ox : 0;
-                    const oy = (cb.originOffset && typeof cb.originOffset.oy === 'number') ? cb.originOffset.oy : 0;
+                    const ox = (cb.originOffset && Number.isFinite(cb.originOffset.ox)) ? cb.originOffset.ox : 0;
+                    const oy = (cb.originOffset && Number.isFinite(cb.originOffset.oy)) ? cb.originOffset.oy : 0;
                     const w = cb.w;
                     const h = cb.h;
                     let topLeftX, topLeftY;
@@ -9844,8 +10006,8 @@ export class SpriteScene extends Scene {
                     const cb = this.clipboard;
                     const posInfo = posInfoGlobal;
                     if (posInfo && posInfo.inside && typeof areaIndex === 'number' && posInfo.areaIndex === areaIndex) {
-                        const ox = (cb.originOffset && typeof cb.originOffset.ox === 'number') ? cb.originOffset.ox : 0;
-                        const oy = (cb.originOffset && typeof cb.originOffset.oy === 'number') ? cb.originOffset.oy : 0;
+                        const ox = (cb.originOffset && Number.isFinite(cb.originOffset.ox)) ? cb.originOffset.ox : 0;
+                        const oy = (cb.originOffset && Number.isFinite(cb.originOffset.oy)) ? cb.originOffset.oy : 0;
                         const w = cb.w;
                         const h = cb.h;
                         const topLeftX = posInfo.x - ox;
@@ -10237,7 +10399,8 @@ export class SpriteScene extends Scene {
 
             // Paste preview: draw actual tiles from tile clipboard (alpha)
             const showPreview = this.keys && (this.keys.held('v') || this.clipboardPreview);
-            if (showPreview && this._tileClipboard && anchor) {
+            const activeType = this._activeClipboardType;
+            if (showPreview && (activeType === 'tile' || (!activeType && this._tileClipboard && !this.spriteClipboard)) && this._tileClipboard && anchor) {
                 const tiles = Array.isArray(this._tileClipboard.tiles) && this._tileClipboard.tiles.length > 0
                     ? this._tileClipboard.tiles
                     : (this._tileClipboard.binding ? [{ dc:0, dr:0, binding: this._tileClipboard.binding, transform: this._tileClipboard.transform }] : []);
@@ -10268,7 +10431,7 @@ export class SpriteScene extends Scene {
                     }
                 };
                 // honor originOffsetTile so preview matches paste origin
-                const origin = (this._tileClipboard && this._tileClipboard.originOffsetTile && typeof this._tileClipboard.originOffsetTile.ox === 'number')
+                const origin = (this._tileClipboard && this._tileClipboard.originOffsetTile && Number.isFinite(this._tileClipboard.originOffsetTile.ox) && Number.isFinite(this._tileClipboard.originOffsetTile.oy))
                     ? this._tileClipboard.originOffsetTile : { ox: 0, oy: 0 };
                 const baseCol = anchor.col - (origin.ox|0);
                 const baseRow = anchor.row - (origin.oy|0);
@@ -10278,7 +10441,7 @@ export class SpriteScene extends Scene {
                     const gPos = this._tileCoordToPos(gx, gy, basePos, tileSize);
                     drawTilePreview(t.binding, t.transform, gPos);
                 }
-            } else if (showPreview && this.spriteClipboard && anchor) {
+            } else if (showPreview && (activeType === 'sprite' || (!activeType && !this._tileClipboard)) && this.spriteClipboard && anchor) {
                 try {
                     const entry = this.spriteClipboard && this.spriteClipboard.entity ? this.spriteClipboard.entity : null;
                     if (entry) {

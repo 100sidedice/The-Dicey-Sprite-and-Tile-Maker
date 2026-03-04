@@ -5,7 +5,12 @@
 - This is a web based powerful pixel art tool, designed to speed up asset creation for games, or just have a bit of fun with. 
 - There is a lot of hidden functionality via the keyboard - take it slow, you don't need to memorize everything in a day; You ussually only use 20% of a progrmas features to get 95% of the same effect.
 - To start of with, left click = draw, right click = erase, shift to select. Click export to export your sprite.
-- For tilemaps, hit 't' on your keybaord to enter tilemode, click y to mirror frames to the map, and space to add tiles. When your art is complete, click export, and type 2 in the prompt so it exports as a tilesheet. 
+- For tilemaps, hit 't' on your keybaord to enter tilemode, click y to mirror frames to the map, and space to add tiles. When your art is complete, click export and pick:
+	- 2 = tilesheet PNG export
+	- 3 = Tiled export package (.tmx map + .tsx tileset + .png atlas)
+- To import from Tiled, click Import Spritesheet and select the TMX file plus its referenced TSX/PNG files in the same picker.
+- Non-tiled export now supports PNG, JPEG, and GIF. PNG/GIF exports prompt for an integer upscale multiplier.
+- GIF export also prompts for which animation to export (name or index).
 
 
 # All controls 

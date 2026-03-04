@@ -402,11 +402,312 @@ export default class FrameSelect {
         this._textInput.focus();
     }
 
+    _basenameFromPath(pathLike){
+        try {
+            const p = String(pathLike || '');
+            const parts = p.split(/[\\/]/g).filter(Boolean);
+            return parts.length ? parts[parts.length - 1] : p;
+        } catch (e) {
+            return String(pathLike || '');
+        }
+    }
+
+    _stripExtension(name){
+        const n = String(name || '');
+        const i = n.lastIndexOf('.');
+        if (i <= 0) return n;
+        return n.slice(0, i);
+    }
+
+    _xmlEscape(v){
+        return String(v ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+    }
+
+    _parseXmlText(text){
+        try {
+            const doc = new DOMParser().parseFromString(String(text || ''), 'application/xml');
+            if (!doc) return null;
+            const err = doc.querySelector('parsererror');
+            if (err) return null;
+            return doc;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async _decodeImageFile(file){
+        if (!file) return null;
+        try {
+            if (window.createImageBitmap) {
+                return await createImageBitmap(file);
+            }
+        } catch (e) {}
+        const url = URL.createObjectURL(file);
+        try {
+            const img = new Image();
+            img.src = url;
+            await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+            return img;
+        } finally {
+            try { URL.revokeObjectURL(url); } catch (e) {}
+        }
+    }
+
+    _readTmxDataToGids(dataEl, width, height){
+        const count = Math.max(0, Number(width || 0) * Number(height || 0));
+        const out = new Array(count).fill(0);
+        if (!dataEl) return out;
+        const encoding = String(dataEl.getAttribute('encoding') || '').trim().toLowerCase();
+        if (encoding === 'csv') {
+            const raw = String(dataEl.textContent || '');
+            const nums = raw.split(',').map(s => Number(String(s || '').trim())).filter(n => Number.isFinite(n));
+            for (let i = 0; i < Math.min(count, nums.length); i++) out[i] = nums[i] >>> 0;
+            return out;
+        }
+        if (!encoding) {
+            const tiles = dataEl.querySelectorAll('tile');
+            let i = 0;
+            for (const t of tiles) {
+                if (i >= count) break;
+                out[i++] = (Number(t.getAttribute('gid') || 0) >>> 0);
+            }
+            return out;
+        }
+        throw new Error('Unsupported TMX data encoding: ' + encoding + ' (supported: csv or tile elements)');
+    }
+
+    _extractTsxInfo(tsxDoc){
+        const tilesetEl = tsxDoc ? (tsxDoc.querySelector('tileset') || tsxDoc.documentElement) : null;
+        if (!tilesetEl || tilesetEl.nodeName !== 'tileset') throw new Error('Invalid TSX: missing <tileset>');
+        const tilewidth = Math.max(1, Number(tilesetEl.getAttribute('tilewidth') || 16) | 0);
+        const tileheight = Math.max(1, Number(tilesetEl.getAttribute('tileheight') || tilewidth) | 0);
+        const columns = Math.max(1, Number(tilesetEl.getAttribute('columns') || 1) | 0);
+        const tilecountAttr = Number(tilesetEl.getAttribute('tilecount') || 0);
+        const imageEl = tilesetEl.querySelector('image');
+        if (!imageEl) throw new Error('Invalid TSX: missing <image>');
+        const imageSource = String(imageEl.getAttribute('source') || '').trim();
+        const imageWidth = Math.max(1, Number(imageEl.getAttribute('width') || 0) | 0);
+        const imageHeight = Math.max(1, Number(imageEl.getAttribute('height') || 0) | 0);
+        const tilecount = Math.max(1, (Number.isFinite(tilecountAttr) && tilecountAttr > 0) ? (tilecountAttr | 0) : (Math.floor((imageWidth || 1) / tilewidth) * Math.floor((imageHeight || 1) / tileheight)));
+
+        const perTile = new Map();
+        const tileEls = tilesetEl.querySelectorAll('tile');
+        for (const t of tileEls) {
+            const id = Number(t.getAttribute('id'));
+            if (!Number.isFinite(id)) continue;
+            const props = {};
+            const propEls = t.querySelectorAll('properties > property');
+            for (const p of propEls) {
+                const n = String(p.getAttribute('name') || '').trim();
+                if (!n) continue;
+                let val = p.getAttribute('value');
+                if (val === null) val = p.textContent || '';
+                props[n] = val;
+            }
+            perTile.set(id | 0, props);
+        }
+        return { tilewidth, tileheight, columns, tilecount, imageSource, imageWidth, imageHeight, perTile };
+    }
+
+    async _handleTiledImport(files, primaryFile){
+        const fileList = Array.from(files || []);
+        const byBase = new Map();
+        for (const f of fileList) byBase.set(this._basenameFromPath(f.name).toLowerCase(), f);
+        const primaryName = this._basenameFromPath(primaryFile && primaryFile.name ? primaryFile.name : '').toLowerCase();
+        const isTmx = primaryName.endsWith('.tmx') || primaryName.endsWith('.xml');
+        const isTsx = primaryName.endsWith('.tsx');
+        if (!isTmx && !isTsx) throw new Error('Not a TMX/TSX file');
+
+        const primaryText = await primaryFile.text();
+        const primaryDoc = this._parseXmlText(primaryText);
+        if (!primaryDoc) throw new Error('Unable to parse XML file: ' + primaryFile.name);
+
+        let mapWidth = 0, mapHeight = 0;
+        let gids = [];
+        let spriteObjects = [];
+        let tsxInfo = null;
+
+        if (isTmx) {
+            const mapEl = primaryDoc.querySelector('map');
+            if (!mapEl) throw new Error('Invalid TMX: missing <map>');
+            mapWidth = Math.max(1, Number(mapEl.getAttribute('width') || 1) | 0);
+            mapHeight = Math.max(1, Number(mapEl.getAttribute('height') || 1) | 0);
+
+            const tilesetRef = mapEl.querySelector('tileset');
+            if (!tilesetRef) throw new Error('Invalid TMX: missing <tileset>');
+            const source = String(tilesetRef.getAttribute('source') || '').trim();
+            if (source) {
+                const tsxFile = byBase.get(this._basenameFromPath(source).toLowerCase());
+                if (!tsxFile) throw new Error('Referenced TSX not found in selection: ' + source);
+                const tsxDoc = this._parseXmlText(await tsxFile.text());
+                if (!tsxDoc) throw new Error('Failed to parse TSX: ' + tsxFile.name);
+                tsxInfo = this._extractTsxInfo(tsxDoc);
+            } else {
+                const tsxDoc = this._parseXmlText(tilesetRef.outerHTML);
+                if (!tsxDoc) throw new Error('Failed to parse inline tileset from TMX');
+                tsxInfo = this._extractTsxInfo(tsxDoc);
+            }
+
+            const layerEl = mapEl.querySelector('layer');
+            if (!layerEl) throw new Error('Invalid TMX: missing <layer>');
+            gids = this._readTmxDataToGids(layerEl.querySelector('data'), mapWidth, mapHeight);
+
+            const objLayers = mapEl.querySelectorAll('objectgroup');
+            spriteObjects = [];
+            for (const g of objLayers) {
+                const objs = g.querySelectorAll('object');
+                for (const o of objs) {
+                    const x = Number(o.getAttribute('x') || 0);
+                    const y = Number(o.getAttribute('y') || 0);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    const p = {};
+                    const propEls = o.querySelectorAll('properties > property');
+                    for (const pe of propEls) {
+                        const pn = String(pe.getAttribute('name') || '').trim();
+                        if (!pn) continue;
+                        let pv = pe.getAttribute('value');
+                        if (pv === null) pv = pe.textContent || '';
+                        p[pn] = pv;
+                    }
+                    spriteObjects.push({ x, y, props: p });
+                }
+            }
+        } else {
+            tsxInfo = this._extractTsxInfo(primaryDoc);
+            mapWidth = Math.max(1, Number(tsxInfo.columns) || 1);
+            mapHeight = Math.max(1, Math.ceil((Number(tsxInfo.tilecount) || 1) / mapWidth));
+            gids = new Array(mapWidth * mapHeight).fill(0).map((_, i) => (i + 1));
+            spriteObjects = [];
+        }
+
+        const imageRefName = this._basenameFromPath(tsxInfo.imageSource || '').toLowerCase();
+        const imageFile = byBase.get(imageRefName);
+        if (!imageFile) throw new Error('Referenced tileset image not found in selection: ' + tsxInfo.imageSource);
+        const imgSource = await this._decodeImageFile(imageFile);
+        if (!imgSource) throw new Error('Failed to decode tileset image: ' + imageFile.name);
+
+        const slice = Math.max(1, Number(tsxInfo.tilewidth) || 16);
+        const cols = Math.max(1, Number(tsxInfo.columns) || Math.floor((Number(tsxInfo.imageWidth) || slice) / slice) || 1);
+        const rows = Math.max(1, Math.ceil((Number(tsxInfo.tilecount) || 1) / cols));
+
+        const ss = new SpriteSheet(imgSource, slice);
+        ss._frames = new Map();
+        for (let r = 0; r < rows; r++) {
+            const frames = [];
+            for (let c = 0; c < cols; c++) {
+                const tid = r * cols + c;
+                if (tid >= (Number(tsxInfo.tilecount) || (rows * cols))) break;
+                frames.push({ __lazy: true, src: imgSource, sx: c * slice, sy: r * slice, w: slice, h: slice });
+            }
+            ss._frames.set('anim' + r, frames);
+        }
+        try { ss._rebuildSheetCanvas(); } catch (e) {}
+
+        if (this.scene) {
+            this.scene.currentSprite = ss;
+            this.sprite = ss;
+            const animNames = Array.from(ss._frames.keys());
+            this.scene.selectedAnimation = animNames[0] || 'anim0';
+            this.scene.selectedFrame = 0;
+            this.scene.tilemode = true;
+            this.scene.tileCols = mapWidth;
+            this.scene.tileRows = mapHeight;
+            this.scene._tileActive = new Set();
+            this.scene._tileCoordToIndex = new Map();
+            this.scene._tileIndexToCoord = [];
+            this.scene._areaBindings = [];
+            this.scene._areaTransforms = [];
+
+            const midC = Math.floor(mapWidth / 2);
+            const midR = Math.floor(mapHeight / 2);
+            const H_FLIP = 0x80000000;
+            const V_FLIP = 0x40000000;
+            const D_FLIP = 0x20000000;
+            const MASK = 0x1FFFFFFF;
+
+            for (let r = 0; r < mapHeight; r++) {
+                for (let c = 0; c < mapWidth; c++) {
+                    const idx1d = r * mapWidth + c;
+                    const raw = (gids[idx1d] >>> 0) || 0;
+                    if (!raw) continue;
+                    const gid = raw & MASK;
+                    if (!gid) continue;
+                    const tileId = Math.max(0, gid - 1);
+                    const col = c - midC;
+                    const row = r - midR;
+                    this.scene._activateTile(col, row);
+                    const areaIndex = this.scene._getAreaIndexForCoord(col, row);
+                    if (!Number.isFinite(areaIndex)) continue;
+
+                    const tileProps = tsxInfo.perTile.get(tileId) || {};
+                    const fallbackAnim = 'anim' + Math.floor(tileId / cols);
+                    const fallbackFrame = tileId % cols;
+                    const anim = String(tileProps.source_anim || fallbackAnim);
+                    const frameIndex = Number.isFinite(Number(tileProps.source_index)) ? (Number(tileProps.source_index) | 0) : fallbackFrame;
+                    let multiFrames = null;
+                    if (tileProps.source_multiFrames) {
+                        try {
+                            const parsed = JSON.parse(String(tileProps.source_multiFrames));
+                            if (Array.isArray(parsed) && parsed.length > 0) multiFrames = parsed.filter(n => Number.isFinite(Number(n))).map(n => Number(n) | 0);
+                        } catch (e) {}
+                    }
+                    this.scene._setAreaBindingAtIndex(areaIndex, { anim, index: frameIndex, multiFrames: (multiFrames && multiFrames.length > 0) ? multiFrames : null }, false);
+
+                    const hasH = !!(raw & H_FLIP);
+                    const hasV = !!(raw & V_FLIP);
+                    const hasD = !!(raw & D_FLIP);
+                    const propRot = Number(tileProps.source_rot || 0);
+                    const propFlipH = String(tileProps.source_flipH || '').toLowerCase() === 'true';
+                    if (hasH || hasV || hasD || propRot || propFlipH) {
+                        this.scene._setAreaTransformAtIndex(areaIndex, { rot: propRot || 0, flipH: !!(propFlipH || hasH) }, false);
+                    }
+                }
+            }
+
+            try {
+                const layer = this.scene._normalizeSpriteLayerState();
+                if (layer) {
+                    layer.entities = {};
+                    layer.order = [];
+                    layer.selectedEntityId = null;
+                }
+            } catch (e) {}
+
+            try {
+                if (Array.isArray(spriteObjects) && spriteObjects.length > 0) {
+                    for (const s of spriteObjects) {
+                        const col = Math.round((Number(s.x) || 0) / slice) - midC;
+                        const row = Math.round(((Number(s.y) || 0) - slice) / slice) - midR;
+                        const anim = String((s.props && s.props.anim) || (this.scene.selectedSpriteAnimation || this.scene.selectedAnimation || 'anim0'));
+                        const created = this.scene._addSpriteEntityAt(col, row, anim, false);
+                        if (created && s.props && Object.prototype.hasOwnProperty.call(s.props, 'fps')) {
+                            const n = Number(s.props.fps);
+                            if (Number.isFinite(n)) this.scene._updateSpriteEntity(created.id, { fps: n }, false);
+                        }
+                    }
+                }
+            } catch (e) {}
+
+            try { if (typeof ss._materializeAnimation === 'function') ss._materializeAnimation(this.scene.selectedAnimation); } catch (e) {}
+        }
+    }
+
     async _handleImportFile(ev){
         try{
             const files = ev.target.files || [];
             if (!files || files.length === 0) return;
             const file = files[0];
+            const lowerName = String(file.name || '').toLowerCase();
+            if (lowerName.endsWith('.tmx') || lowerName.endsWith('.tsx') || lowerName.endsWith('.xml')) {
+                await this._handleTiledImport(files, file);
+                try{ ev.target.value = ''; } catch(e){}
+                return;
+            }
             // Ask whether this file should be treated as a spritesheet (default) or tilesheet
             let importMode = 'spritesheet';
             try {
@@ -584,48 +885,134 @@ export default class FrameSelect {
         try{
             const sheet = this.sprite && this.sprite.sheet ? this.sprite.sheet : null;
             if (!sheet) { alert('No sprite sheet to export'); return; }
-            // Ask whether to export as spritesheet (packed) or tilesheet (current tile-mode view)
+            // Ask whether to export as spritesheet, tilesheet, or Tiled map package.
             let exportMode = 'spritesheet';
             try {
                 try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet', '1');
+                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet, 3 = tiled (.tmx/.tsx)', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
                     if (v === '2') exportMode = 'tilesheet';
+                    else if (v === '3') exportMode = 'tiled';
                     else exportMode = 'spritesheet';
                 }
             } catch (e) { /* ignore and keep spritesheet */ }
+
+            let exportFormat = 'png';
+            if (exportMode !== 'tiled') {
+                try {
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                    const fmtChoice = window.prompt('Image format? 1 = PNG, 2 = JPEG, 3 = GIF', '1');
+                    const v = String(fmtChoice || '1').trim();
+                    if (v === '2') exportFormat = 'jpeg';
+                    else if (v === '3') exportFormat = 'gif';
+                    else exportFormat = 'png';
+                } catch (e) { /* default png */ }
+            }
+
+            let upscaleMultiplier = 1;
+            if (exportMode !== 'tiled' && (exportFormat === 'png' || exportFormat === 'gif')) {
+                try {
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                    const up = window.prompt('Upscale multiplier (PNG/GIF, integer >= 1)', '1');
+                    if (up !== null) {
+                        const n = Math.floor(Number(up));
+                        if (Number.isFinite(n) && n >= 1) upscaleMultiplier = n;
+                    }
+                } catch (e) { /* keep default */ }
+            }
+
+            let gifAnimationName = null;
+            if (exportMode === 'spritesheet' && exportFormat === 'gif') {
+                try {
+                    const animNames = (this.sprite && this.sprite._frames) ? Array.from(this.sprite._frames.keys()) : [];
+                    if (animNames.length > 0) {
+                        const defaultAnim = (this.scene && this.scene.selectedAnimation && animNames.includes(this.scene.selectedAnimation))
+                            ? this.scene.selectedAnimation
+                            : animNames[0];
+                        const defaultIndex = Math.max(1, animNames.indexOf(defaultAnim) + 1);
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt(
+                            `GIF animation to export (name or 1-${animNames.length})`,
+                            String(defaultAnim || defaultIndex)
+                        );
+                        if (input === null) return;
+                        const raw = String(input || '').trim();
+                        let resolved = defaultAnim;
+                        const maybeIndex = Number(raw);
+                        if (raw && Number.isFinite(maybeIndex)) {
+                            const idx = Math.floor(maybeIndex) - 1;
+                            if (idx >= 0 && idx < animNames.length) resolved = animNames[idx];
+                        } else if (raw && animNames.includes(raw)) {
+                            resolved = raw;
+                        }
+                        if (!resolved || !animNames.includes(resolved)) {
+                            alert('Invalid animation selection for GIF export.');
+                            return;
+                        }
+                        gifAnimationName = resolved;
+                    }
+                } catch (e) { /* ignore, fallback to selected animation logic */ }
+            }
+
+            const extensionForFormat = (fmt) => {
+                if (fmt === 'jpeg') return '.jpg';
+                if (fmt === 'gif') return '.gif';
+                return '.png';
+            };
+
             const defaultName = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : 'spritesheet';
             try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-            const filenamePrompt = window.prompt('Export filename', defaultName + '.png');
+            const filenamePrompt = window.prompt('Export filename', defaultName + (exportMode === 'tiled' ? '.tmx' : extensionForFormat(exportFormat)));
             // If the user cancelled the prompt (null), abort export and do not download.
             if (filenamePrompt === null) return;
-            const filename = filenamePrompt || (defaultName + '.png');
+            const filename = filenamePrompt || (defaultName + (exportMode === 'tiled' ? '.tmx' : extensionForFormat(exportFormat)));
             // Prompt whether to also download metadata JSON. If confirmed, ask for a metadata filename.
             let wantMeta = false;
             let chosenMetaFilename = null;
-            try {
-                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                    const wantMetaConfirm = window.confirm('Also download metadata JSON alongside the PNG?');
-                if (wantMetaConfirm) {
-                    const suggestedMeta = (filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json');
-                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                    const metaPrompt = window.prompt('Metadata filename (Cancel to skip)', suggestedMeta);
-                    if (metaPrompt !== null) {
-                        chosenMetaFilename = metaPrompt || suggestedMeta;
-                        wantMeta = true;
-                    } else {
-                        wantMeta = false;
+            if (exportMode !== 'tiled') {
+                try {
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const wantMetaConfirm = window.confirm('Also download metadata JSON alongside the exported image?');
+                    if (wantMetaConfirm) {
+                        const ext = extensionForFormat(exportFormat).replace('.', '\\.');
+                        const suggestedMeta = (filename && new RegExp(ext + '$', 'i').test(filename)) ? filename.replace(new RegExp(ext + '$', 'i'), '.json') : (filename + '.json');
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const metaPrompt = window.prompt('Metadata filename (Cancel to skip)', suggestedMeta);
+                        if (metaPrompt !== null) {
+                            chosenMetaFilename = metaPrompt || suggestedMeta;
+                            wantMeta = true;
+                        } else {
+                            wantMeta = false;
+                        }
                     }
+                } catch (e) { /* ignore prompt failures */ }
+            }
+
+            const canvasToBlobByFormat = async (canvas, format) => {
+                if (!canvas) return null;
+                if (format === 'jpeg') {
+                    return await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', 0.92));
                 }
-            } catch (e) { /* ignore prompt failures */ }
+                if (format === 'gif') {
+                    try {
+                        const dataUrl = canvas.toDataURL('image/gif');
+                        if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/gif')) {
+                            const resp = await fetch(dataUrl);
+                            return await resp.blob();
+                        }
+                    } catch (e) {}
+                    return null;
+                }
+                return await new Promise((res) => canvas.toBlob((b) => res(b), 'image/png'));
+            };
             // toBlob
             // ensure packed sheet is available (may have been deferred for performance)
             try { if (this.sprite && typeof this.sprite.ensurePackedSheet === 'function') this.sprite.ensurePackedSheet(); } catch(e) {}
 
             // Build an export canvas depending on mode
             let exportCanvas = null;
-            if (exportMode === 'tilesheet' && this.scene && this.scene.currentSprite) {
+            if ((exportMode === 'tilesheet' || exportMode === 'tiled') && this.scene && this.scene.currentSprite) {
                 try {
                     const scene = this.scene;
                     const slice = scene.currentSprite.slicePx || (this.sprite && this.sprite.slicePx) || 16;
@@ -759,11 +1146,34 @@ export default class FrameSelect {
             } else {
                 // Original spritesheet export: optionally merge layered groups for the current animation
                 try {
+                    if (exportFormat === 'gif' && gifAnimationName && this.sprite && this.sprite._frames && this.sprite._frames.has(gifAnimationName)) {
+                        const slice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                        const arr = this.sprite._frames.get(gifAnimationName) || [];
+                        let logicalCount = 0;
+                        for (let i = 0; i < arr.length; i++) {
+                            const e = arr[i];
+                            if (!e || e.__groupStart || e.__groupEnd) continue;
+                            logicalCount++;
+                        }
+                        logicalCount = Math.max(1, logicalCount);
+                        exportCanvas = document.createElement('canvas');
+                        exportCanvas.width = logicalCount * slice;
+                        exportCanvas.height = slice;
+                        const ectx = exportCanvas.getContext('2d');
+                        try { ectx.imageSmoothingEnabled = false; } catch (e) {}
+                        for (let li = 0; li < logicalCount; li++) {
+                            try {
+                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(gifAnimationName, li) : null;
+                                if (src) ectx.drawImage(src, li * slice, 0, slice, slice);
+                            } catch (e) { /* ignore frame draw */ }
+                        }
+                    }
+
                     const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
                     const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
                     const groups = this._getFrameGroups(anim);
                     const hasLayered = Array.isArray(groups) && groups.some(g => !!g.layered);
-                    if (anim && framesArr.length > 0 && hasLayered) {
+                    if (!exportCanvas && anim && framesArr.length > 0 && hasLayered) {
                         // Build logical sequence collapsing layered groups
                         const seq = [];
                         for (let i = 0; i < framesArr.length; i++){
@@ -816,14 +1226,183 @@ export default class FrameSelect {
                 } catch (err) { console.warn('build merged export canvas failed', err); }
             }
 
-            const blob = await new Promise((res)=> {
-                if (exportCanvas && exportCanvas.toBlob) return exportCanvas.toBlob((b)=>res(b), 'image/png');
-                if (sheet && sheet.toBlob) return sheet.toBlob((b)=>res(b), 'image/png');
-                // fallback: try to use sprite.sheet canvas if available
-                try { if (this.sprite && this.sprite.sheet && this.sprite.sheet.toBlob) return this.sprite.sheet.toBlob((b)=>res(b), 'image/png'); } catch(e){}
-                // ultimate fallback: create an empty 1x1 png
-                const c = document.createElement('canvas'); c.width = 1; c.height = 1; c.toBlob((b)=>res(b), 'image/png');
-            });
+            if (exportMode === 'tiled') {
+                const tiles = exportCanvas && exportCanvas._tilesheetMeta ? exportCanvas._tilesheetMeta : null;
+                if (!tiles || !exportCanvas) {
+                    alert('Unable to build tiled export data from current map.');
+                    return;
+                }
+
+                const baseInput = this._basenameFromPath(filename);
+                const baseName = this._stripExtension(baseInput) || defaultName || 'map';
+                const mapFileName = baseName + '.tmx';
+                const tilesetFileName = baseName + '.tsx';
+                const imageFileName = baseName + '.png';
+
+                const pngBlob = await new Promise((res) => exportCanvas.toBlob((b) => res(b), 'image/png'));
+                if (!pngBlob) {
+                    alert('Failed to create tileset PNG for TMX export.');
+                    return;
+                }
+
+                const width = tiles.cols | 0;
+                const height = tiles.rows | 0;
+                const slice = tiles.slice | 0;
+                const gidGrid = new Array(Math.max(1, width * height)).fill(0);
+                const bindByLocal = new Map();
+                for (const b of (Array.isArray(tiles.bindings) ? tiles.bindings : [])) {
+                    if (!b) continue;
+                    const lc = (Number(b.col) | 0) - (tiles.minCol | 0);
+                    const lr = (Number(b.row) | 0) - (tiles.minRow | 0);
+                    if (lc < 0 || lr < 0 || lc >= width || lr >= height) continue;
+                    const localId = lr * width + lc;
+                    bindByLocal.set(localId, b);
+                }
+                for (const t of (Array.isArray(tiles.activeTiles) ? tiles.activeTiles : [])) {
+                    if (!t) continue;
+                    const lc = (Number(t.col) | 0) - (tiles.minCol | 0);
+                    const lr = (Number(t.row) | 0) - (tiles.minRow | 0);
+                    if (lc < 0 || lr < 0 || lc >= width || lr >= height) continue;
+                    const localId = lr * width + lc;
+                    gidGrid[localId] = localId + 1;
+                }
+
+                const tileEntries = Array.from(bindByLocal.entries()).sort((a, b) => a[0] - b[0]);
+                const tsxTileLines = tileEntries.map(([id, b]) => {
+                    const props = [];
+                    props.push(`<property name="source_anim" value="${this._xmlEscape(b.anim || '')}"/>`);
+                    props.push(`<property name="source_index" type="int" value="${Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0}"/>`);
+                    if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) {
+                        props.push(`<property name="source_multiFrames" value="${this._xmlEscape(JSON.stringify(b.multiFrames.map(n => Number(n) | 0)))}"/>`);
+                    }
+                    if (b.transform && (b.transform.rot || b.transform.flipH)) {
+                        props.push(`<property name="source_rot" type="int" value="${Number(b.transform.rot || 0) | 0}"/>`);
+                        props.push(`<property name="source_flipH" type="bool" value="${b.transform.flipH ? 'true' : 'false'}"/>`);
+                    }
+                    return `  <tile id="${id}">\n    <properties>\n      ${props.join('\n      ')}\n    </properties>\n  </tile>`;
+                }).join('\n');
+
+                const tsx = [
+                    '<?xml version="1.0" encoding="UTF-8"?>',
+                    `<tileset version="1.10" tiledversion="1.11.0" name="${this._xmlEscape(baseName)}" tilewidth="${slice}" tileheight="${slice}" tilecount="${width * height}" columns="${width}">`,
+                    `  <image source="${this._xmlEscape(imageFileName)}" width="${width * slice}" height="${height * slice}"/>`,
+                    tsxTileLines,
+                    '</tileset>'
+                ].filter(Boolean).join('\n');
+
+                const csvRows = [];
+                for (let r = 0; r < height; r++) {
+                    const row = [];
+                    for (let c = 0; c < width; c++) row.push(gidGrid[r * width + c] || 0);
+                    csvRows.push(row.join(','));
+                }
+                const csvData = '\n' + csvRows.join(',\n') + '\n';
+
+                const spriteLayer = this.scene && typeof this.scene._normalizeSpriteLayerState === 'function'
+                    ? this.scene._normalizeSpriteLayerState()
+                    : null;
+                const spriteEntities = [];
+                if (spriteLayer && spriteLayer.entities) {
+                    const order = Array.isArray(spriteLayer.order) ? spriteLayer.order.slice() : Object.keys(spriteLayer.entities);
+                    for (const id of order) {
+                        const e = spriteLayer.entities[id];
+                        if (!e) continue;
+                        const col = Number(e.col);
+                        const row = Number(e.row);
+                        if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
+                        spriteEntities.push({ id, col: col | 0, row: row | 0, anim: e.anim || '', fps: e.fps, parentAnim: e.parentAnim || '' });
+                    }
+                }
+                let objectId = 1;
+                const objLines = spriteEntities.map((s) => {
+                    const x = (s.col - (tiles.minCol | 0)) * slice;
+                    const y = (s.row - (tiles.minRow | 0) + 1) * slice;
+                    const propParts = [
+                        `<property name="anim" value="${this._xmlEscape(s.anim)}"/>`,
+                        Number.isFinite(Number(s.fps)) ? `<property name="fps" type="float" value="${Number(s.fps)}"/>` : '',
+                        s.parentAnim ? `<property name="parentAnim" value="${this._xmlEscape(s.parentAnim)}"/>` : ''
+                    ].filter(Boolean).join('\n        ');
+                    return `    <object id="${objectId++}" name="sprite" type="sprite" x="${x}" y="${y}" width="${slice}" height="${slice}">\n      <properties>\n        ${propParts}\n      </properties>\n    </object>`;
+                }).join('\n');
+
+                const tmx = [
+                    '<?xml version="1.0" encoding="UTF-8"?>',
+                    `<map version="1.10" tiledversion="1.11.0" orientation="orthogonal" renderorder="right-down" width="${width}" height="${height}" tilewidth="${slice}" tileheight="${slice}" infinite="0" nextlayerid="3" nextobjectid="${Math.max(1, objectId)}">`,
+                    `  <tileset firstgid="1" source="${this._xmlEscape(tilesetFileName)}"/>`,
+                    `  <layer id="1" name="Tile Layer 1" width="${width}" height="${height}">`,
+                    `    <data encoding="csv">${csvData}    </data>`,
+                    '  </layer>',
+                    objLines ? `  <objectgroup id="2" name="Sprites">\n${objLines}\n  </objectgroup>` : '',
+                    '</map>'
+                ].filter(Boolean).join('\n');
+
+                const tsxBlob = new Blob([tsx], { type: 'application/xml' });
+                const tmxBlob = new Blob([tmx], { type: 'application/xml' });
+
+                if (window.showSaveFilePicker) {
+                    try {
+                        const tmxHandle = await window.showSaveFilePicker({ suggestedName: mapFileName, types: [{ description: 'Tiled TMX', accept: { 'application/xml': ['.tmx'] } }] });
+                        const tmxWritable = await tmxHandle.createWritable();
+                        await tmxWritable.write(tmxBlob);
+                        await tmxWritable.close();
+
+                        const tsxHandle = await window.showSaveFilePicker({ suggestedName: tilesetFileName, types: [{ description: 'Tiled TSX', accept: { 'application/xml': ['.tsx'] } }] });
+                        const tsxWritable = await tsxHandle.createWritable();
+                        await tsxWritable.write(tsxBlob);
+                        await tsxWritable.close();
+
+                        const imgHandle = await window.showSaveFilePicker({ suggestedName: imageFileName, types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }] });
+                        const imgWritable = await imgHandle.createWritable();
+                        await imgWritable.write(pngBlob);
+                        await imgWritable.close();
+                        return;
+                    } catch (e) {
+                        console.warn('tiled export save picker canceled/failed', e);
+                    }
+                }
+
+                const dl = (blob, name, delay = 0) => {
+                    setTimeout(() => {
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = name;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            try { URL.revokeObjectURL(url); } catch (e) {}
+                            try { a.remove(); } catch (e) {}
+                        }, 1600);
+                    }, delay);
+                };
+                dl(tmxBlob, mapFileName, 0);
+                dl(tsxBlob, tilesetFileName, 250);
+                dl(pngBlob, imageFileName, 500);
+                return;
+            }
+
+            const sourceCanvas = exportCanvas || sheet || (this.sprite && this.sprite.sheet ? this.sprite.sheet : null);
+            let encodeCanvas = sourceCanvas;
+            if (encodeCanvas && upscaleMultiplier > 1 && exportMode !== 'tiled' && (exportFormat === 'png' || exportFormat === 'gif')) {
+                const up = document.createElement('canvas');
+                up.width = Math.max(1, (encodeCanvas.width | 0) * upscaleMultiplier);
+                up.height = Math.max(1, (encodeCanvas.height | 0) * upscaleMultiplier);
+                const uctx = up.getContext('2d');
+                try { uctx.imageSmoothingEnabled = false; } catch (e) {}
+                try { uctx.drawImage(encodeCanvas, 0, 0, up.width, up.height); } catch (e) {}
+                encodeCanvas = up;
+            }
+
+            let blob = await canvasToBlobByFormat(encodeCanvas, exportFormat);
+            if (!blob && exportFormat === 'gif') {
+                alert('GIF encoding is not supported in this browser. Please use PNG or JPEG.');
+                return;
+            }
+            if (!blob) {
+                const c = document.createElement('canvas');
+                c.width = 1; c.height = 1;
+                blob = await canvasToBlobByFormat(c, 'png');
+            }
             // Build metadata JSON containing groups and basic animation info
             const buildMetadata = () => {
                 const meta = {};
@@ -874,13 +1453,16 @@ export default class FrameSelect {
             const metaObj = buildMetadata();
             const metaStr = JSON.stringify(metaObj, null, 2);
             const metaBlob = new Blob([metaStr], { type: 'application/json' });
-            const metaFilename = chosenMetaFilename || ((filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json'));
+            const imageExt = extensionForFormat(exportFormat).replace('.', '\\.');
+            const metaFilename = chosenMetaFilename || ((filename && new RegExp(imageExt + '$', 'i').test(filename)) ? filename.replace(new RegExp(imageExt + '$', 'i'), '.json') : (filename + '.json'));
 
             // Use File System Access API when available to save PNG and optionally metadata
             if (window.showSaveFilePicker){
                 try{
-                    // Save PNG
-                    const handle = await window.showSaveFilePicker({ suggestedName: filename, types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }] });
+                    const saveMime = exportFormat === 'jpeg' ? 'image/jpeg' : (exportFormat === 'gif' ? 'image/gif' : 'image/png');
+                    const saveExt = exportFormat === 'jpeg' ? '.jpg' : (exportFormat === 'gif' ? '.gif' : '.png');
+                    const saveDesc = exportFormat === 'jpeg' ? 'JPEG Image' : (exportFormat === 'gif' ? 'GIF Image' : 'PNG Image');
+                    const handle = await window.showSaveFilePicker({ suggestedName: filename, types: [{ description: saveDesc, accept: { [saveMime]: [saveExt] } }] });
                     const writable = await handle.createWritable();
                     await writable.write(blob);
                     await writable.close();
@@ -902,7 +1484,7 @@ export default class FrameSelect {
                 }
             }
 
-            // fallback: anchor download for PNG then metadata JSON
+            // fallback: anchor download for image then metadata JSON
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -944,7 +1526,8 @@ export default class FrameSelect {
             // Hidden file input for import
             const inputPos = new Vector(-3000, -3000);
             this._importInput = createHInput('import-spritesheet-input', inputPos, new Vector(10,10), 'file', {}, uiCanvas.parentNode);
-            this._importInput.accept = 'image/*';
+            this._importInput.accept = 'image/*,.tmx,.tsx,.xml,text/xml,application/xml';
+            this._importInput.multiple = true;
             this._importInput.style.display = 'none';
 
             this._importBtn.addEventListener('click', ()=>{ this._importInput.click(); });
