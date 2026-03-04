@@ -54,6 +54,9 @@ export function installSpriteSceneStateBindings(scene) {
     bindProp(scene, 'tilemode', 'state', ['tilemap', 'enabled']);
     bindProp(scene, 'tileCols', 'state', ['tilemap', 'cols']);
     bindProp(scene, 'tileRows', 'state', ['tilemap', 'rows']);
+    bindProp(scene, 'selectedSpriteAnimation', 'state', ['spriteLayer', 'selectedAnimation']);
+    bindProp(scene, 'selectedSpriteEntityId', 'state', ['spriteLayer', 'selectedEntityId']);
+    bindProp(scene, 'spriteClipboard', 'state', ['spriteLayer', 'clipboard']);
     bindProp(scene, 'selectionRegion', 'state', ['selection', 'region']);
     bindProp(scene, 'selectionPoints', 'state', ['selection', 'points']);
     bindProp(scene, 'clipboard', 'state', ['selection', 'clipboard']);

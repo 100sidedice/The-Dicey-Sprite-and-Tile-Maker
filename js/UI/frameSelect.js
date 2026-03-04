@@ -21,7 +21,9 @@ export default class FrameSelect {
         this.scrollPos = 0
         this._animTimer = 0;
         this._animIndex = 0;
-        this._animFps = 8;
+        this._animFps = (scene && typeof scene._getSpriteAnimationFps === 'function' && scene.selectedAnimation)
+            ? scene._getSpriteAnimationFps(scene.selectedAnimation, 8)
+            : 8;
         this._previewSize = 256;
         this._previewBuffer = 16;
         this._animName = null;
@@ -34,7 +36,13 @@ export default class FrameSelect {
         const sliderSize = new Vector(this._previewSize+this._previewBuffer*2, 20);
         let fpsSlider = new UISlider(this.mouse, this.keys, sliderPos, sliderSize, this.layer, 'scalar', this._animFps, 0, 24, '#888888', '#444444', '#222222', '#FFFF00',null);
         fpsSlider.onChange.connect((v) => { 
-            this._animFps = Math.max(0, Math.round(v)); 
+            this._animFps = Math.max(0, Math.round(v));
+            try {
+                const anim = this.scene && this.scene.selectedAnimation ? this.scene.selectedAnimation : null;
+                if (anim && this.scene && typeof this.scene._setSpriteAnimationProfile === 'function') {
+                    this.scene._setSpriteAnimationProfile(anim, { fps: this._animFps }, true);
+                }
+            } catch (e) {}
             if(this._animFps === 0) this._animIndex = this.selectedFrame
         });
         this.menu = new Menu(this.mouse, this.keys, new Vector(0, 0), new Vector(200, 1080), this.layer, '#FFFFFF22');
@@ -311,6 +319,7 @@ export default class FrameSelect {
         if (this.scene) {
             this.scene.selectedAnimation = newName;
             this.scene.selectedFrame = 0;
+            try { if (typeof this.scene._onAnimationAdded === 'function') this.scene._onAnimationAdded(newName); } catch (e) {}
         }
         // spawn text input to rename immediately
         this._spawnTextInputFor(newName);
@@ -336,6 +345,7 @@ export default class FrameSelect {
         try {
             if (this.scene && typeof this.scene._remapAnimationReferences === 'function') {
                 this.scene._remapAnimationReferences(oldName, newName);
+                if (typeof this.scene._onAnimationRenamed === 'function') this.scene._onAnimationRenamed(oldName, newName);
             } else if (this.scene && this.scene.selectedAnimation === oldName) {
                 this.scene.selectedAnimation = newName;
             }
@@ -354,6 +364,7 @@ export default class FrameSelect {
         try {
             if (this.sprite._frameGroups && typeof this.sprite._frameGroups.delete === 'function') this.sprite._frameGroups.delete(name);
         } catch (e) {}
+        try { if (this.scene && typeof this.scene._onAnimationRemoved === 'function') this.scene._onAnimationRemoved(name); } catch (e) {}
         // adjust selection
         const names = this._getAnimationNames();
         if (this.scene){
@@ -954,6 +965,22 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
+
+        // Absorb input when cursor is over FrameSelect UI so map/tile tools don't also process click/drag.
+        try {
+            const p = this.mouse && this.mouse.pos ? this.mouse.pos : null;
+            if (p) {
+                const overLeftMenu = Geometry.pointInRect(p, this.menu.pos, this.menu.size);
+                const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
+                const rightPanelSize = new Vector(this._previewSize + this._previewBuffer * 2, 1080 - this._previewBuffer);
+                const overRightPanel = Geometry.pointInRect(p, outerPos, rightPanelSize);
+                const interacting = this.mouse.pressed('left') || this.mouse.held('left') || this.mouse.pressed('right') || this.mouse.held('right');
+                if ((overLeftMenu || overRightPanel) && interacting) {
+                    this.mouse.addMask(1);
+                }
+            }
+        } catch (e) {}
+
         // active group (id of last-clicked group slot)
         if (typeof this._activeGroup === 'undefined') this._activeGroup = null;
 
@@ -1022,6 +1049,14 @@ export default class FrameSelect {
                 this._animName = anim;
                 this._animIndex = 0;
                 this._animTimer = 0;
+                try {
+                    if (this.scene && typeof this.scene._getSpriteAnimationFps === 'function') {
+                        this._animFps = this.scene._getSpriteAnimationFps(anim, this._animFps || 8);
+                        if (this.menu && this.menu.elements && this.menu.elements.get('fpsSlider')) {
+                            this.menu.elements.get('fpsSlider').value = this._animFps;
+                        }
+                    }
+                } catch (e) {}
             }
             // if fps is 0 (paused), map the scene.selectedFrame into the logical sequence index
             try {
@@ -1722,12 +1757,18 @@ export default class FrameSelect {
                         } else if (Geometry.pointInRect(this.mouse.pos, removeRect, removeSize)){
                             this.removeAnimation(name);
                         } else {
-                            // select animation
-                            if (this.scene) this.scene.selectedAnimation = name;
-                            // clear any multi-frame selection when switching animations
-                            if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
-                            // materialize frames for the selected animation (lazy-load)
-                            try { if (this.sprite && typeof this.sprite._materializeAnimation === 'function') this.sprite._materializeAnimation(name); } catch(e) {}
+                            const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                            if (shiftHeld) {
+                                if (this.scene && typeof this.scene._setSpritePlacementAnimation === 'function') this.scene._setSpritePlacementAnimation(name);
+                                else if (this.scene) this.scene.selectedSpriteAnimation = name;
+                            } else {
+                                // select animation
+                                if (this.scene) this.scene.selectedAnimation = name;
+                                // clear any multi-frame selection when switching animations
+                                if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
+                                // materialize frames for the selected animation (lazy-load)
+                                try { if (this.sprite && typeof this.sprite._materializeAnimation === 'function') this.sprite._materializeAnimation(name); } catch(e) {}
+                            }
                         }
                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
                         break;
@@ -1903,6 +1944,8 @@ export default class FrameSelect {
                 // background
                 const isSel = (this.scene && this.scene.selectedAnimation === name);
                 this.UIDraw.rect(rpos, rsize, isSel ? '#333344' : '#222222');
+                const isSpriteSel = !!(this.scene && this.scene.selectedSpriteAnimation === name);
+                if (isSpriteSel) this.UIDraw.rect(rpos, rsize, '#00AA6633');
                 // name text
                 this.UIDraw.text(String(name), new Vector(rpos.x + 8, rpos.y + rsize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
                 // rename button

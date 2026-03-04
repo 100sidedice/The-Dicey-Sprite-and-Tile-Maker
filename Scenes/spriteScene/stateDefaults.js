@@ -106,6 +106,20 @@ export function initializeSpriteSceneState(scene, currentSprite) {
             bindings: [],
             transforms: []
         },
+        spriteLayer: {
+            selectedAnimation: null,
+            selectedEntityId: null,
+            nextEntityId: 1,
+            entities: {},
+            order: [],
+            animationProfiles: {
+                idle: {
+                    fps: 8,
+                    parent: null
+                }
+            },
+            clipboard: null
+        },
         fps: {
             'anim/idle/0/layer0': 8
         }
@@ -170,6 +184,10 @@ export function initializeSpriteSceneState(scene, currentSprite) {
 
     scene._tileClipboard = null;
     scene._tileSelection = new Set();
+    scene._spriteClipboard = null;
+    scene._spriteHoverEntityId = null;
+    scene._spritePlacementPreview = null;
+    scene._spriteInteractionMaskUntil = 0;
     scene._clipboardBrushActive = false;
     scene._clipboardBrushFired = false;
     scene._clipboardBrushBlinkPhase = 0;

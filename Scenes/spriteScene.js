@@ -66,6 +66,8 @@ export class SpriteScene extends Scene {
         this.stateController = createSpriteSceneStateController(this);
         this.webrtcCollab = createSpriteWebRTCCollabController(this);
         setupSpriteSceneMultiplayerHooks(this, this.currentSprite);
+        this._syncSpriteAnimationProfilesFromSheet();
+        if (!this.selectedSpriteAnimation) this.selectedSpriteAnimation = this.selectedAnimation || 'idle';
         this.configureCollabTransport();
         if (this.EM && typeof this.EM.connect === 'function') {
             try {
@@ -1710,10 +1712,86 @@ export class SpriteScene extends Scene {
         return;
     }
 
+    _handleSpriteEntityInteractions() {
+        try {
+            if (!this.tilemode || !this.mouse || !this.keys) {
+                this._spriteHoverEntityId = null;
+                return false;
+            }
+            const pos = this.getPos(this.mouse && this.mouse.pos);
+            if (!pos || (!pos.renderOnly && !pos.inside)) {
+                this._spriteHoverEntityId = null;
+                return false;
+            }
+            if (!Number.isFinite(Number(pos.tileCol)) || !Number.isFinite(Number(pos.tileRow))) {
+                this._spriteHoverEntityId = null;
+                return false;
+            }
+
+            const col = Number(pos.tileCol) | 0;
+            const row = Number(pos.tileRow) | 0;
+            const hitId = this._hitTestSpriteEntityAt(col, row);
+            this._spriteHoverEntityId = hitId;
+
+            const placementActive = !!this.selectedSpriteAnimation;
+            const hasNoModifiers = !this.keys.held('Shift') && !this.keys.held('Control') && !this.keys.held('Alt');
+            const leftDown = this.mouse.pressed('left') || this.mouse.held('left');
+
+            // While in sprite placement mode, absorb left press/hold over valid tile cells
+            // so tile paint/bind tools do not run in the same click.
+            if (placementActive && hasNoModifiers && leftDown) {
+                this._spriteInteractionMaskUntil = Date.now() + 180;
+                try { this.mouse.addMask(1); } catch (e) {}
+                return true;
+            }
+
+            // Absorb click/drag intent while cursor is over a sprite so tile tools don't also fire.
+            if (hitId && (this.mouse.pressed('left') || this.mouse.held('left'))) {
+                this._spriteInteractionMaskUntil = Date.now() + 160;
+                try { this.mouse.addMask(1); } catch (e) {}
+                return true;
+            }
+
+            if (!this.mouse.released('left')) return false;
+            if (this.keys.held('Shift') || this.keys.held('Control') || this.keys.held('Alt')) return false;
+
+            if (hitId) {
+                this.selectedSpriteEntityId = hitId;
+                this.modifyState(hitId, false, false, ['spriteLayer', 'selectedEntityId']);
+                this._spriteInteractionMaskUntil = Date.now() + 120;
+                try { this.mouse.addMask(1); } catch (e) {}
+                return true;
+            }
+
+            const anim = this.selectedSpriteAnimation || null;
+            if (!anim) return false;
+            this._activateTile(col, row, true);
+            const created = this._addSpriteEntityAt(col, row, anim, true);
+            if (!created) return false;
+            this.modifyState(created.id, false, false, ['spriteLayer', 'selectedEntityId']);
+            this._spriteInteractionMaskUntil = Date.now() + 120;
+            try { this.mouse.addMask(1); } catch (e) {}
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     // tick handler: called by Scene.tick() via sceneTick
     sceneTick(tickDelta){
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
+        try {
+            const currentAnim = String(this.selectedAnimation || '');
+            const prevAnim = String(this._lastEditorAnimationForSpriteSelection || '');
+            if (currentAnim !== prevAnim) {
+                this._lastEditorAnimationForSpriteSelection = currentAnim;
+                this.selectedSpriteAnimation = null;
+                this.modifyState(null, false, false, ['spriteLayer', 'selectedAnimation']);
+            }
+        } catch (e) { /* ignore animation-switch sprite clear errors */ }
+        try { this._syncSpriteAnimationProfilesFromSheet(); } catch (e) {}
+        try { this._advanceSpriteEntityAnimation(tickDelta); } catch (e) {}
         this._clipboardBrushBlinkPhase = (this._clipboardBrushBlinkPhase || 0) + tickDelta;
         this.mouse.setMask(0)
         this.FrameSelect.update()
@@ -1744,6 +1822,8 @@ export class SpriteScene extends Scene {
         } catch (e) { /* ignore selection keyframe apply errors */ }
         const posForShortcutKeys = this.getPos(this.mouse && this.mouse.pos);
         const renderOnlyTile = !!(this.tilemode && posForShortcutKeys && posForShortcutKeys.renderOnly);
+        this._spriteInputConsumedThisTick = false;
+        try { this._spriteInputConsumedThisTick = !!this._handleSpriteEntityInteractions(); } catch (e) { this._spriteInputConsumedThisTick = false; }
         // handle numeric keys to change brush size (1..5). If multiple number keys are pressed simultaneously,
         // sum them for larger brushes (e.g., 2+3 => size 5, 1+2+3+4+5 => size 15). Max capped at 15.
         // Holding Shift while pressing number keys captures the current selection into the clipboard and
@@ -2251,9 +2331,12 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) { /* ignore mirror toggle errors */ }
 
-                // tools (pen) operate during ticks
-                this.selectionTool && this.selectionTool();
-                this.penTool && this.penTool();
+                // tools (pen/selection) operate during ticks unless sprite interaction consumed this input.
+                const spriteMaskActive = !!(this._spriteInteractionMaskUntil && Date.now() < this._spriteInteractionMaskUntil);
+                if (!this._spriteInputConsumedThisTick && !spriteMaskActive) {
+                    this.selectionTool && this.selectionTool();
+                    this.penTool && this.penTool();
+                }
             // Throttle cursor sends when mouse moves
             try {
                 const mp = (this.mouse && this.mouse.pos) ? this.mouse.pos : null;
@@ -2283,6 +2366,7 @@ export class SpriteScene extends Scene {
     penTool() {
         try {
             if (!this.mouse || !this.currentSprite) return;
+            if (this._spriteInteractionMaskUntil && Date.now() < this._spriteInteractionMaskUntil) return;
             if (this.keys.held('Shift')) return;
             if(this.keys.held('v')) return;
             
@@ -3229,7 +3313,8 @@ export class SpriteScene extends Scene {
             if (this.mouse.pressed('right') && !this.keys.held('Shift')) {
                 const hadPixelSelection = (this.selectionPoints && this.selectionPoints.length) || this.selectionRegion;
                 const hadTileSelection = renderOnlyTile && this._tileSelection && this._tileSelection.size > 0;
-                if (hadPixelSelection || hadTileSelection) {
+                const hadSpriteSelection = !!(this.selectedSpriteEntityId && this._getSpriteEntities()[this.selectedSpriteEntityId]);
+                if (hadPixelSelection || hadTileSelection || hadSpriteSelection) {
                     if (this.stateController) this.stateController.clearPixelSelection();
                     else {
                         this.selectionPoints = [];
@@ -3237,6 +3322,10 @@ export class SpriteScene extends Scene {
                         this.selectionRegion = null;
                     }
                     if (hadTileSelection) this._tileSelection.clear();
+                    if (hadSpriteSelection) {
+                        this.selectedSpriteEntityId = null;
+                        this.modifyState(null, false, false, ['spriteLayer', 'selectedEntityId']);
+                    }
                     this.mouse.pause(0.2);
                     return true;
                 }
@@ -3954,17 +4043,22 @@ export class SpriteScene extends Scene {
                 }
                 const posForClipboard = this.getPos(this.mouse && this.mouse.pos);
                 const allowTileClipboard = !!(this.tilemode && ((posForClipboard && posForClipboard.renderOnly) || (this._tileSelection && this._tileSelection.size > 0)));
+                const allowSpriteClipboard = !!(this.tilemode && this.selectedSpriteEntityId && this._getSpriteEntities()[this.selectedSpriteEntityId]);
                 if (this.keys.pressed('c')) {
-                    if (allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
+                    if (allowSpriteClipboard || allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
                 }
                 if (this.keys.pressed('x')) {
-                    if (allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCut();
+                    if (allowSpriteClipboard || allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCut();
                 }
                 if (this.keys.released('v')) {
                     // paste at mouse position (tiles or pixels)
                     const posInfo = this.getPos(this.mouse && this.mouse.pos);
+                    const allowSpritePaste = !!(this.tilemode && posInfo && (posInfo.renderOnly || posInfo.inside) && (this.spriteClipboard || this._spriteClipboard));
                     const allowTilePaste = !!(this.tilemode && posInfo && posInfo.renderOnly && this._tileClipboard);
-                    if (allowTilePaste) {
+                    if (allowSpritePaste) {
+                        this.doPaste(this.mouse && this.mouse.pos);
+                        this._justPasted = true;
+                    } else if (allowTilePaste) {
                         this.doPaste(this.mouse && this.mouse.pos);
                         this._justPasted = true;
                     } else if (this.clipboard) {
@@ -6140,6 +6234,22 @@ export class SpriteScene extends Scene {
     doCopy(localOnly = false) {
         try {
             const sheet = this.currentSprite;
+            const spriteLayer = this._normalizeSpriteLayerState();
+            const selectedSpriteId = this.selectedSpriteEntityId || (spriteLayer ? spriteLayer.selectedEntityId : null);
+            const selectedSprite = (spriteLayer && selectedSpriteId && spriteLayer.entities) ? spriteLayer.entities[selectedSpriteId] : null;
+            if (this.tilemode && selectedSprite) {
+                const payload = {
+                    type: 'sprite-entity',
+                    entity: {
+                        anim: selectedSprite.anim || this.selectedSpriteAnimation || this.selectedAnimation,
+                        fps: (selectedSprite.fps === null || selectedSprite.fps === undefined || selectedSprite.fps === '') ? null : (Number.isFinite(Number(selectedSprite.fps)) ? Number(selectedSprite.fps) : null),
+                        parentAnim: selectedSprite.parentAnim || this._inferSpriteAnimationParent(selectedSprite.anim)
+                    }
+                };
+                this.spriteClipboard = payload;
+                this._spriteClipboard = payload;
+                return;
+            }
             const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
             const haveTileSelection = !!(this._tileSelection && this._tileSelection.size > 0);
             if (this.tilemode && (haveTileSelection || (posInfoForTile && posInfoForTile.renderOnly))) {
@@ -6295,6 +6405,15 @@ export class SpriteScene extends Scene {
     doCut() {
         try {
             if (!this.currentSprite) return;
+            const spriteLayer = this._normalizeSpriteLayerState();
+            const selectedSpriteId = this.selectedSpriteEntityId || (spriteLayer ? spriteLayer.selectedEntityId : null);
+            const selectedSprite = (spriteLayer && selectedSpriteId && spriteLayer.entities) ? spriteLayer.entities[selectedSpriteId] : null;
+            if (this.tilemode && selectedSprite && selectedSpriteId) {
+                this.doCopy(true);
+                this._deleteSpriteEntity(selectedSpriteId, true);
+                this.modifyState(null, false, false, ['spriteLayer', 'selectedEntityId']);
+                return;
+            }
             const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
             const haveTileSelection = !!(this._tileSelection && this._tileSelection.size > 0);
             if (this.tilemode && (haveTileSelection || (posInfoForTile && posInfoForTile.renderOnly))) {
@@ -6392,12 +6511,30 @@ export class SpriteScene extends Scene {
     // Paste clipboard at a screen mouse position (mousePos is a Vector in screen space)
     doPaste(mousePos) {
         try {
-            if (!this.clipboard && !this._tileClipboard) return;
+            if (!this.clipboard && !this._tileClipboard && !this.spriteClipboard && !this._spriteClipboard) return;
             if (!this.currentSprite) return;
             const sheet = this.currentSprite;
             const slice = sheet.slicePx || 1;
             const pos = this.getPos(mousePos);
             if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
+
+            const spriteClip = this.spriteClipboard || this._spriteClipboard || null;
+            if (this.tilemode && spriteClip && spriteClip.type === 'sprite-entity') {
+                if (Number.isFinite(Number(pos.tileCol)) && Number.isFinite(Number(pos.tileRow))) {
+                    const col = Number(pos.tileCol) | 0;
+                    const row = Number(pos.tileRow) | 0;
+                    const src = spriteClip.entity || {};
+                    const created = this._addSpriteEntityAt(col, row, src.anim || this.selectedSpriteAnimation || this.selectedAnimation, true);
+                    if (created && src.fps !== null && src.fps !== undefined && src.fps !== '' && Number.isFinite(Number(src.fps))) {
+                        this._updateSpriteEntity(created.id, { fps: Number(src.fps) }, true);
+                    }
+                    if (created) {
+                        this.selectedSpriteEntityId = created.id;
+                        this.modifyState(created.id, false, false, ['spriteLayer', 'selectedEntityId']);
+                    }
+                }
+                return;
+            }
 
             // Resolve destination anim/frame and tile origin (col,row) when in tilemode
             let anim = this.selectedAnimation;
@@ -6677,6 +6814,32 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _flushPendingSpriteOpsToBuffer() {
+        try {
+            if (!this._spriteOpPending || this._spriteOpPending.size === 0) return 0;
+            if (!this._opBuffer) this._opBuffer = [];
+            const now = Date.now();
+            const entries = [];
+            for (const op of this._spriteOpPending.values()) {
+                if (!op || typeof op !== 'object') continue;
+                entries.push(op);
+            }
+            const chunkSize = 96;
+            for (let i = 0; i < entries.length; i += chunkSize) {
+                this._opBuffer.push({
+                    type: 'spriteBlob',
+                    client: this.clientId,
+                    time: now,
+                    ops: entries.slice(i, i + chunkSize)
+                });
+            }
+            this._spriteOpPending.clear();
+            return entries.length;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     // Override Scene.sendState: send buffered pixel edit ops to server using per-op keys
     sendState() {
         try {
@@ -6689,6 +6852,7 @@ export class SpriteScene extends Scene {
 
             // Coalesce queued per-tile mutations into compact tileBlob ops.
             this._flushPendingTileOpsToBuffer();
+            this._flushPendingSpriteOpsToBuffer();
 
             // Build an update object mapping nested keys to op payloads so firebase update() creates distinct children
             const diff = {};
@@ -6707,7 +6871,7 @@ export class SpriteScene extends Scene {
             }
 
             // If backlog remains, keep draining without waiting for new edits.
-            if ((this._opBuffer && this._opBuffer.length > 0) || (this._tileOpPending && this._tileOpPending.size > 0)) {
+            if ((this._opBuffer && this._opBuffer.length > 0) || (this._tileOpPending && this._tileOpPending.size > 0) || (this._spriteOpPending && this._spriteOpPending.size > 0)) {
                 this._scheduleSend();
             }
         } catch (e) { console.warn('sendState failed', e); }
@@ -6877,6 +7041,7 @@ export class SpriteScene extends Scene {
                                         this._suppressOutgoing = false;
                                     }
                                     try { this._remapAnimationReferences(from, to); } catch (e) {}
+                                    try { this._onAnimationRenamed(from, to); } catch (e) {}
                                     applied++;
                                 }
                             }
@@ -6968,6 +7133,33 @@ export class SpriteScene extends Scene {
                             }
                             applied++;
                         } catch (e) { /* ignore tile blob errors */ }
+                        finally { this._suppressOutgoing = false; }
+                    } else if (op.type === 'spriteBlob' && Array.isArray(op.ops)) {
+                        try {
+                            this._suppressOutgoing = true;
+                            this._normalizeSpriteLayerState();
+                            for (const sop of op.ops) {
+                                if (!sop || typeof sop !== 'object') continue;
+                                if (sop.k === 'add' && sop.e && sop.e.id) {
+                                    const layer = this._normalizeSpriteLayerState();
+                                    const id = String(sop.e.id);
+                                    layer.entities[id] = { ...sop.e };
+                                    if (!Array.isArray(layer.order)) layer.order = [];
+                                    if (!layer.order.includes(id)) layer.order.push(id);
+                                    const numericId = Number(String(id).replace(/^sp_/, ''));
+                                    if (Number.isFinite(numericId)) layer.nextEntityId = Math.max(Number(layer.nextEntityId) || 1, numericId + 1);
+                                } else if (sop.k === 'update' && sop.id) {
+                                    const entities = this._getSpriteEntities();
+                                    const id = String(sop.id);
+                                    if (entities[id]) Object.assign(entities[id], sop.p || {});
+                                } else if (sop.k === 'delete' && sop.id) {
+                                    this._deleteSpriteEntity(String(sop.id), false);
+                                } else if (sop.k === 'profile' && sop.anim) {
+                                    this._setSpriteAnimationProfile(String(sop.anim), { fps: Number(sop.fps) || 0, parent: sop.parent || null }, false);
+                                }
+                            }
+                            applied++;
+                        } catch (e) { /* ignore sprite blob errors */ }
                         finally { this._suppressOutgoing = false; }
                     } else if (op.type === 'draw' && Array.isArray(op.pixels)) {
                         // Apply incoming draw ops as-is and rely on server/update
@@ -7170,6 +7362,7 @@ export class SpriteScene extends Scene {
                 animations: {},
                 tileCols: this.tileCols,
                 tileRows: this.tileRows,
+                spriteLayer: null,
             };
             if (Array.isArray(this._areaBindings)) {
                 snap.bindings = this._areaBindings.map((b, i) => {
@@ -7183,6 +7376,26 @@ export class SpriteScene extends Scene {
                 snap.activeTiles = Array.from(this._tileActive.values()).map(k => this._parseTileKey(k)).filter(Boolean);
             }
             if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
+            try {
+                const layer = this._normalizeSpriteLayerState();
+                if (layer) {
+                    const entities = {};
+                    for (const id of Object.keys(layer.entities || {})) {
+                        const e = layer.entities[id];
+                        if (!e) continue;
+                        entities[id] = { ...e };
+                    }
+                    snap.spriteLayer = {
+                        selectedAnimation: layer.selectedAnimation || null,
+                        selectedEntityId: layer.selectedEntityId || null,
+                        nextEntityId: Number(layer.nextEntityId) || 1,
+                        entities,
+                        order: Array.isArray(layer.order) ? layer.order.slice() : [],
+                        animationProfiles: JSON.parse(JSON.stringify(layer.animationProfiles || {})),
+                        clipboard: layer.clipboard ? JSON.parse(JSON.stringify(layer.clipboard)) : null
+                    };
+                }
+            } catch (e) { /* ignore sprite snapshot errors */ }
             const animNames = Array.from(sheet._frames.keys());
             let row = 0;
             for (const name of animNames) {
@@ -7298,6 +7511,21 @@ export class SpriteScene extends Scene {
                     }
                     this._setAreaTransformAtIndex(idx, { rot: Number(t.rot || 0), flipH: !!t.flipH }, false);
                 }
+            }
+            if (snapshot.spriteLayer && typeof snapshot.spriteLayer === 'object') {
+                const incoming = snapshot.spriteLayer;
+                const layer = this._normalizeSpriteLayerState();
+                layer.selectedAnimation = incoming.selectedAnimation || null;
+                layer.selectedEntityId = incoming.selectedEntityId || null;
+                layer.nextEntityId = Math.max(1, Number(incoming.nextEntityId) || 1);
+                layer.entities = (incoming.entities && typeof incoming.entities === 'object') ? JSON.parse(JSON.stringify(incoming.entities)) : {};
+                layer.order = Array.isArray(incoming.order) ? incoming.order.slice() : Object.keys(layer.entities || {});
+                layer.animationProfiles = (incoming.animationProfiles && typeof incoming.animationProfiles === 'object')
+                    ? JSON.parse(JSON.stringify(incoming.animationProfiles))
+                    : {};
+                layer.clipboard = incoming.clipboard ? JSON.parse(JSON.stringify(incoming.clipboard)) : null;
+                this.selectedSpriteAnimation = layer.selectedAnimation;
+                this.selectedSpriteEntityId = layer.selectedEntityId;
             }
             return true;
         } catch (e) {
@@ -8170,6 +8398,369 @@ export class SpriteScene extends Scene {
         return { col: col - midC, row: row - midR };
     }
 
+    _normalizeSpriteLayerState() {
+        try {
+            if (!this.state) this.state = {};
+            if (!this.state.spriteLayer || typeof this.state.spriteLayer !== 'object') this.state.spriteLayer = {};
+            const layer = this.state.spriteLayer;
+            if (!layer.entities || typeof layer.entities !== 'object') layer.entities = {};
+            if (!Array.isArray(layer.order)) layer.order = [];
+            if (!layer.animationProfiles || typeof layer.animationProfiles !== 'object') layer.animationProfiles = {};
+            if (!Number.isFinite(layer.nextEntityId) || layer.nextEntityId < 1) layer.nextEntityId = 1;
+            if (!Object.prototype.hasOwnProperty.call(layer, 'selectedAnimation')) layer.selectedAnimation = null;
+            if (!Object.prototype.hasOwnProperty.call(layer, 'selectedEntityId')) layer.selectedEntityId = null;
+            if (!Object.prototype.hasOwnProperty.call(layer, 'clipboard')) layer.clipboard = null;
+            return layer;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getSpriteEntities() {
+        const layer = this._normalizeSpriteLayerState();
+        return layer ? layer.entities : {};
+    }
+
+    _inferSpriteAnimationParent(anim) {
+        try {
+            const name = String(anim || '').trim();
+            if (!name || !name.includes('-')) return null;
+            const parent = name.split('-')[0] || null;
+            if (!parent) return null;
+            const sheet = this.currentSprite;
+            if (!sheet || !sheet._frames || !sheet._frames.has(parent)) return null;
+            return parent;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getSpriteAnimationProfile(anim, createIfMissing = true) {
+        try {
+            const name = String(anim || '').trim();
+            if (!name) return null;
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return null;
+            if (!layer.animationProfiles[name] && createIfMissing) {
+                layer.animationProfiles[name] = {
+                    fps: 8,
+                    parent: this._inferSpriteAnimationParent(name)
+                };
+            }
+            return layer.animationProfiles[name] || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getSpriteAnimationFps(anim, fallback = 8) {
+        try {
+            const profile = this._getSpriteAnimationProfile(anim, true);
+            const val = Number(profile && profile.fps);
+            return Number.isFinite(val) ? Math.max(0, val) : fallback;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    _resolveEntityFpsValue(entity, anim, fallback = 8) {
+        try {
+            const raw = entity ? entity.fps : undefined;
+            if (raw === null || raw === undefined || raw === '') return this._getSpriteAnimationFps(anim, fallback);
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return this._getSpriteAnimationFps(anim, fallback);
+            return Math.max(0, n);
+        } catch (e) {
+            return this._getSpriteAnimationFps(anim, fallback);
+        }
+    }
+
+    _setSpriteAnimationProfile(anim, patch = {}, syncOp = true) {
+        try {
+            const name = String(anim || '').trim();
+            if (!name) return false;
+            const profile = this._getSpriteAnimationProfile(name, true);
+            if (!profile) return false;
+            if (patch.fps !== undefined) profile.fps = Math.max(0, Number(patch.fps) || 0);
+            if (Object.prototype.hasOwnProperty.call(patch, 'parent')) profile.parent = patch.parent || null;
+            if (syncOp) this._queueSpriteOp('profile', { anim: name, fps: profile.fps, parent: profile.parent || null });
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _syncSpriteAnimationProfilesFromSheet() {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return;
+            const sheet = this.currentSprite;
+            if (!sheet || !sheet._frames) return;
+            const names = Array.from(sheet._frames.keys());
+            for (const name of names) {
+                const p = this._getSpriteAnimationProfile(name, true);
+                if (p && !Object.prototype.hasOwnProperty.call(p, 'parent')) p.parent = this._inferSpriteAnimationParent(name);
+                if (p && (p.fps === null || p.fps === undefined || !Number.isFinite(Number(p.fps)))) p.fps = 8;
+            }
+            for (const key of Object.keys(layer.animationProfiles)) {
+                if (!names.includes(key)) delete layer.animationProfiles[key];
+            }
+            if (this.selectedSpriteAnimation && !names.includes(this.selectedSpriteAnimation)) {
+                this.selectedSpriteAnimation = names[0] || null;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _onAnimationAdded(name) {
+        try {
+            const anim = String(name || '').trim();
+            if (!anim) return;
+            this._getSpriteAnimationProfile(anim, true);
+            if (!this.selectedSpriteAnimation) this.selectedSpriteAnimation = anim;
+        } catch (e) { /* ignore */ }
+    }
+
+    _onAnimationRemoved(name) {
+        try {
+            const anim = String(name || '').trim();
+            if (!anim) return;
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return;
+            delete layer.animationProfiles[anim];
+            for (const id of Object.keys(layer.entities || {})) {
+                const ent = layer.entities[id];
+                if (ent && ent.anim === anim) this._deleteSpriteEntity(id, true);
+            }
+            if (this.selectedSpriteAnimation === anim) {
+                const names = this.currentSprite && this.currentSprite._frames ? Array.from(this.currentSprite._frames.keys()) : [];
+                this.selectedSpriteAnimation = names[0] || null;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _onAnimationRenamed(oldName, newName) {
+        try {
+            const from = String(oldName || '').trim();
+            const to = String(newName || '').trim();
+            if (!from || !to || from === to) return;
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return;
+            if (layer.animationProfiles[from] && !layer.animationProfiles[to]) {
+                layer.animationProfiles[to] = layer.animationProfiles[from];
+            }
+            delete layer.animationProfiles[from];
+            for (const id of Object.keys(layer.entities || {})) {
+                const ent = layer.entities[id];
+                if (ent && ent.anim === from) ent.anim = to;
+            }
+            for (const key of Object.keys(layer.animationProfiles || {})) {
+                const p = layer.animationProfiles[key];
+                if (p && p.parent === from) p.parent = to;
+            }
+            if (this.selectedSpriteAnimation === from) this.selectedSpriteAnimation = to;
+            this._setSpriteAnimationProfile(to, { parent: this._inferSpriteAnimationParent(to) }, true);
+        } catch (e) { /* ignore */ }
+    }
+
+    _setSpritePlacementAnimation(animName) {
+        try {
+            const anim = String(animName || '').trim();
+            if (!anim) return null;
+            this._getSpriteAnimationProfile(anim, true);
+            this.selectedSpriteAnimation = anim;
+            return anim;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _createSpriteEntityId() {
+        const layer = this._normalizeSpriteLayerState();
+        if (!layer) return `sp_${Date.now()}`;
+        const id = `sp_${Math.max(1, Number(layer.nextEntityId) || 1)}`;
+        layer.nextEntityId = Math.max(1, Number(layer.nextEntityId) || 1) + 1;
+        return id;
+    }
+
+    _addSpriteEntityAt(col, row, anim = null, syncOp = true) {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return null;
+            const targetAnim = String(anim || this.selectedSpriteAnimation || this.selectedAnimation || '').trim();
+            if (!targetAnim) return null;
+            const ent = {
+                id: this._createSpriteEntityId(),
+                col: Number(col) | 0,
+                row: Number(row) | 0,
+                anim: targetAnim,
+                phaseMs: Date.now(),
+                fps: null,
+                parentAnim: this._inferSpriteAnimationParent(targetAnim)
+            };
+            layer.entities[ent.id] = ent;
+            if (!layer.order.includes(ent.id)) layer.order.push(ent.id);
+            layer.selectedEntityId = ent.id;
+            this.selectedSpriteEntityId = ent.id;
+            this._getSpriteAnimationProfile(targetAnim, true);
+            if (syncOp) this._queueSpriteOp('add', { entity: { ...ent } });
+            return ent;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _updateSpriteEntity(id, patch = {}, syncOp = true) {
+        try {
+            const entities = this._getSpriteEntities();
+            if (!id || !entities[id]) return false;
+            const ent = entities[id];
+            Object.assign(ent, patch || {});
+            if (patch && patch.anim) ent.parentAnim = this._inferSpriteAnimationParent(ent.anim);
+            if (syncOp) this._queueSpriteOp('update', { id, patch: { ...patch } });
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _deleteSpriteEntity(id, syncOp = true) {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer || !id || !layer.entities[id]) return false;
+            delete layer.entities[id];
+            layer.order = (layer.order || []).filter(v => v !== id);
+            if (layer.selectedEntityId === id) layer.selectedEntityId = null;
+            if (this.selectedSpriteEntityId === id) this.selectedSpriteEntityId = null;
+            if (syncOp) this._queueSpriteOp('delete', { id });
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _hitTestSpriteEntityAt(col, row) {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return null;
+            const order = Array.isArray(layer.order) ? layer.order : [];
+            const entities = layer.entities || {};
+            for (let i = order.length - 1; i >= 0; i--) {
+                const id = order[i];
+                const e = entities[id];
+                if (!e) continue;
+                if ((Number(e.col) | 0) === (Number(col) | 0) && (Number(e.row) | 0) === (Number(row) | 0)) return id;
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _queueSpriteOp(action, payload = {}) {
+        try {
+            if (this._suppressOutgoing) return false;
+            if (!this._spriteOpPending) this._spriteOpPending = new Map();
+            if (action === 'add') {
+                const entity = payload && payload.entity ? payload.entity : null;
+                if (!entity || !entity.id) return false;
+                this._spriteOpPending.set(String(entity.id), { k: 'add', e: { ...entity } });
+            } else if (action === 'update') {
+                const id = String(payload.id || '');
+                if (!id) return false;
+                const current = this._spriteOpPending.get(id);
+                if (current && current.k === 'add') {
+                    current.e = { ...current.e, ...(payload.patch || {}) };
+                    this._spriteOpPending.set(id, current);
+                } else {
+                    const prevPatch = (current && current.k === 'update' && current.p) ? current.p : {};
+                    this._spriteOpPending.set(id, { k: 'update', id, p: { ...prevPatch, ...(payload.patch || {}) } });
+                }
+            } else if (action === 'delete') {
+                const id = String(payload.id || '');
+                if (!id) return false;
+                this._spriteOpPending.set(id, { k: 'delete', id });
+            } else if (action === 'profile') {
+                const anim = String(payload.anim || '');
+                if (!anim) return false;
+                this._spriteOpPending.set(`profile:${anim}`, { k: 'profile', anim, fps: Number(payload.fps) || 0, parent: payload.parent || null });
+            } else {
+                return false;
+            }
+            this._scheduleSend && this._scheduleSend();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getAnimationLogicalFrameCount(anim) {
+        try {
+            const arr = (this.currentSprite && this.currentSprite._frames) ? (this.currentSprite._frames.get(anim) || []) : [];
+            let logical = 0;
+            for (let i = 0; i < arr.length; i++) {
+                const entry = arr[i];
+                if (!entry || entry.__groupStart || entry.__groupEnd) continue;
+                logical++;
+            }
+            return Math.max(1, logical);
+        } catch (e) {
+            return 1;
+        }
+    }
+
+    _advanceSpriteEntityAnimation(tickDelta = 0) {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer || !layer.entities) return;
+            if (!this._spriteAnimRuntime || !(this._spriteAnimRuntime instanceof Map)) this._spriteAnimRuntime = new Map();
+
+            const dt = Math.max(0, Number(tickDelta) || 0);
+            const entities = layer.entities;
+            const activeAnims = new Set();
+
+            for (const ent of Object.values(entities)) {
+                if (!ent) continue;
+                const anim = String(ent.anim || this.selectedAnimation || 'idle');
+                if (!anim) continue;
+                activeAnims.add(anim);
+            }
+
+            for (const anim of activeAnims.values()) {
+                const frameCount = this._getAnimationLogicalFrameCount(anim);
+                const fps = this._getSpriteAnimationFps(anim, 8);
+
+                let runtime = this._spriteAnimRuntime.get(String(anim));
+                if (!runtime || runtime.anim !== anim || runtime.fps !== fps || runtime.frameCount !== frameCount) {
+                    runtime = {
+                        anim,
+                        fps,
+                        frameCount,
+                        frame: 0,
+                        accSec: 0
+                    };
+                }
+
+                if (fps > 0 && frameCount > 1 && dt > 0) {
+                    runtime.accSec += dt;
+                    const step = 1 / fps;
+                    while (runtime.accSec >= step) {
+                        runtime.accSec -= step;
+                        runtime.frame = (runtime.frame + 1) % frameCount;
+                    }
+                } else {
+                    runtime.frame = Math.max(0, Math.min(frameCount - 1, Number(runtime.frame) || 0));
+                    if (!(fps > 0)) runtime.accSec = 0;
+                }
+
+                this._spriteAnimRuntime.set(String(anim), runtime);
+            }
+
+            for (const key of Array.from(this._spriteAnimRuntime.keys())) {
+                if (!activeAnims.has(String(key))) this._spriteAnimRuntime.delete(key);
+            }
+        } catch (e) { /* ignore sprite anim runtime errors */ }
+    }
+
     _drawRenderOnlyTileBatch(basePos, size, visible, hoverCoord = null) {
         try {
             const ctx = this.Draw && this.Draw.ctx;
@@ -8755,6 +9346,7 @@ export class SpriteScene extends Scene {
                 if (area && !area.renderOnly) this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
             }
         }
+        this._drawSpriteEntities(basePos, size, visible);
         // Draw the global tile cursor / selection / paste preview once (not per-area)
         this._drawTileCursorOverlay();
 
@@ -8824,6 +9416,11 @@ export class SpriteScene extends Scene {
         const pct = Math.round(this.state.brush.pixelBrush.adjustAmount[key] * 100);
         const label = `Adjust: ${ch}  ${pct}%`;
         this.UIDraw.text(label, new Vector(1920 - 12, 1080 - 8), '#FFFFFFFF', 1, 14, { align: 'right', baseline: 'bottom', font: 'monospace' });
+        const spriteAnimLabel = this.selectedSpriteAnimation ? `Sprite Place: ${this.selectedSpriteAnimation}` : 'Sprite Place: (none)';
+        this.UIDraw.text(spriteAnimLabel, new Vector(1920 - 12, 1080 - 28), '#66FFCCFF', 1, 13, { align: 'right', baseline: 'bottom', font: 'monospace' });
+        if (this.selectedSpriteEntityId) {
+            this.UIDraw.text(`Sprite Selected: ${this.selectedSpriteEntityId}`, new Vector(1920 - 12, 1080 - 46), '#66CCFFFF', 1, 12, { align: 'right', baseline: 'bottom', font: 'monospace' });
+        }
     }
 
     /**
@@ -9432,6 +10029,46 @@ export class SpriteScene extends Scene {
         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), color, true);
     }
 
+    _drawSpriteEntities(basePos, tileSize, visible = null) {
+        try {
+            if (!this.tilemode || !this.currentSprite) return;
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return;
+            const order = Array.isArray(layer.order) ? layer.order : [];
+            const entities = layer.entities || {};
+
+            for (let i = 0; i < order.length; i++) {
+                const id = order[i];
+                const ent = entities[id];
+                if (!ent) continue;
+                const col = Number(ent.col) | 0;
+                const row = Number(ent.row) | 0;
+                if (visible && (col < visible.minCol || col > visible.maxCol || row < visible.minRow || row > visible.maxRow)) continue;
+                const pos = this._tileCoordToPos(col, row, basePos, tileSize);
+
+                const anim = ent.anim || this.selectedAnimation;
+                const runtime = (this._spriteAnimRuntime && this._spriteAnimRuntime.get(String(anim))) ? this._spriteAnimRuntime.get(String(anim)) : null;
+                const frameCount = this._getAnimationLogicalFrameCount(anim);
+                let frameIndex = 0;
+                if (runtime && runtime.anim === anim) {
+                    frameIndex = Math.max(0, Math.min(frameCount - 1, Number(runtime.frame) || 0));
+                }
+                const frameCanvas = (typeof this.currentSprite.getFrame === 'function')
+                    ? this.currentSprite.getFrame(anim, frameIndex)
+                    : null;
+                if (frameCanvas) {
+                    this.Draw.image(frameCanvas, pos, tileSize, null, 0, 0.95, false);
+                }
+
+                if (this.selectedSpriteEntityId && String(this.selectedSpriteEntityId) === String(id)) {
+                    this.Draw.rect(pos, tileSize, '#00FF66FF', false, true, Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03)), '#00FF66FF');
+                } else if (this._spriteHoverEntityId && String(this._spriteHoverEntityId) === String(id)) {
+                    this.Draw.rect(pos, tileSize, '#FFFFFFFF', false, true, Math.max(1, Math.round(Math.min(tileSize.x, tileSize.y) * 0.02)), '#FFFFFFFF');
+                }
+            }
+        } catch (e) { /* ignore sprite entity draw errors */ }
+    }
+
     // Draw the tile cursor, selection outlines, and paste preview once per frame.
     _drawTileCursorOverlay() {
         try {
@@ -9641,6 +10278,36 @@ export class SpriteScene extends Scene {
                     const gPos = this._tileCoordToPos(gx, gy, basePos, tileSize);
                     drawTilePreview(t.binding, t.transform, gPos);
                 }
+            } else if (showPreview && this.spriteClipboard && anchor) {
+                try {
+                    const entry = this.spriteClipboard && this.spriteClipboard.entity ? this.spriteClipboard.entity : null;
+                    if (entry) {
+                        const anim = entry.anim || this.selectedSpriteAnimation || this.selectedAnimation;
+                        const fps = this._resolveEntityFpsValue(entry, anim, 8);
+                        const frameCount = (() => {
+                            const arr = (this.currentSprite && this.currentSprite._frames) ? (this.currentSprite._frames.get(anim) || []) : [];
+                            let logical = 0;
+                            for (let i = 0; i < arr.length; i++) {
+                                const e = arr[i];
+                                if (!e || e.__groupStart || e.__groupEnd) continue;
+                                logical++;
+                            }
+                            return Math.max(1, logical);
+                        })();
+                        const phase = Number(entry.phaseMs) || Date.now();
+                        const idx = (fps > 0 && frameCount > 0)
+                            ? (Math.floor((Date.now() - phase) / (1000 / fps)) % frameCount)
+                            : 0;
+                        const frameCanvas = (this.currentSprite && typeof this.currentSprite.getFrame === 'function')
+                            ? this.currentSprite.getFrame(anim, idx)
+                            : null;
+                        if (frameCanvas) {
+                            const previewPos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize);
+                            this.Draw.image(frameCanvas, previewPos, tileSize, null, 0, 0.65, false);
+                            this.Draw.rect(previewPos, tileSize, '#00FFFFFF', false, true, Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03)), '#00FFFFFF');
+                        }
+                    }
+                } catch (e) { /* ignore sprite preview draw errors */ }
             }
         } catch (e) { /* ignore overlay draw errors */ }
     }
