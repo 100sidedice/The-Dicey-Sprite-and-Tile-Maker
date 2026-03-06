@@ -7,8 +7,8 @@
 - To start of with, left click = draw, right click = erase, shift to select. Click export to export your sprite.
 - For tilemaps, hit 't' on your keybaord to enter tilemode, click y to mirror frames to the map, and space to add tiles. When your art is complete, click export and pick:
 	- 2 = tilesheet PNG export
-	- 3 = Tiled export package (.tmx map + .tsx tileset + .png atlas)
-- To import from Tiled, click Import Spritesheet and select the TMX file plus its referenced TSX/PNG files in the same picker.
+	- 3 = Tiled export package (.zip containing .tmx map + .tsx tileset + .png atlas)
+- To import from Tiled, click Import Spritesheet and select either the exported `.zip` package or a TMX file plus its referenced TSX/PNG files in the same picker.
 - Non-tiled export now supports PNG, JPEG, and GIF. PNG/GIF exports prompt for an integer upscale multiplier.
 - GIF export also prompts for which animation to export (name or index).
 

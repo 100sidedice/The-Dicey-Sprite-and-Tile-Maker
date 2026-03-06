@@ -55,6 +55,7 @@ export default class FrameSelect {
         this._importInput = null;
         this._importBtn = null;
         this._exportBtn = null;
+        this._jsZipCtor = null;
         this._createImportExportUI();
     }
 
@@ -428,6 +429,61 @@ export default class FrameSelect {
             .replace(/'/g, '&apos;');
     }
 
+    async _getJsZipCtor(){
+        if (this._jsZipCtor) return this._jsZipCtor;
+        if (typeof window !== 'undefined' && window.JSZip) {
+            this._jsZipCtor = window.JSZip;
+            return this._jsZipCtor;
+        }
+        try {
+            const mod = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
+            this._jsZipCtor = mod && mod.default ? mod.default : mod;
+            return this._jsZipCtor;
+        } catch (e) {
+            throw new Error('ZIP support is unavailable in this browser session.');
+        }
+    }
+
+    _mimeTypeForFilename(name){
+        const lower = String(name || '').toLowerCase();
+        if (lower.endsWith('.tmx') || lower.endsWith('.tsx') || lower.endsWith('.xml')) return 'application/xml';
+        if (lower.endsWith('.png')) return 'image/png';
+        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+        if (lower.endsWith('.gif')) return 'image/gif';
+        if (lower.endsWith('.json')) return 'application/json';
+        if (lower.endsWith('.zip')) return 'application/zip';
+        return 'application/octet-stream';
+    }
+
+    async _extractTiledFilesFromZip(zipFile){
+        const JSZip = await this._getJsZipCtor();
+        const archive = await JSZip.loadAsync(zipFile);
+        const files = [];
+        const names = Object.keys(archive.files || {});
+        for (const name of names) {
+            const entry = archive.files[name];
+            if (!entry || entry.dir) continue;
+            const baseName = this._basenameFromPath(name);
+            if (!baseName) continue;
+            const blob = await entry.async('blob');
+            const mime = this._mimeTypeForFilename(baseName);
+            let asFile = null;
+            try {
+                asFile = new File([blob], baseName, { type: mime });
+            } catch (e) {
+                asFile = blob;
+                try { Object.defineProperty(asFile, 'name', { value: baseName, configurable: true }); } catch (ignore) {}
+            }
+            files.push(asFile);
+        }
+        if (files.length === 0) throw new Error('ZIP archive is empty.');
+
+        const pickByExt = (ext) => files.find((f) => String((f && f.name) || '').toLowerCase().endsWith(ext));
+        const primaryFile = pickByExt('.tmx') || pickByExt('.tsx') || pickByExt('.xml');
+        if (!primaryFile) throw new Error('ZIP does not contain a TMX/TSX/XML file.');
+        return { files, primaryFile };
+    }
+
     _parseXmlText(text){
         try {
             const doc = new DOMParser().parseFromString(String(text || ''), 'application/xml');
@@ -703,6 +759,12 @@ export default class FrameSelect {
             if (!files || files.length === 0) return;
             const file = files[0];
             const lowerName = String(file.name || '').toLowerCase();
+            if (lowerName.endsWith('.zip')) {
+                const unpacked = await this._extractTiledFilesFromZip(file);
+                await this._handleTiledImport(unpacked.files, unpacked.primaryFile);
+                try{ ev.target.value = ''; } catch(e){}
+                return;
+            }
             if (lowerName.endsWith('.tmx') || lowerName.endsWith('.tsx') || lowerName.endsWith('.xml')) {
                 await this._handleTiledImport(files, file);
                 try{ ev.target.value = ''; } catch(e){}
@@ -889,7 +951,7 @@ export default class FrameSelect {
             let exportMode = 'spritesheet';
             try {
                 try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet, 3 = tiled (.tmx/.tsx)', '1');
+                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet, 3 = tiled (.zip package)', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
                     if (v === '2') exportMode = 'tilesheet';
@@ -963,10 +1025,10 @@ export default class FrameSelect {
 
             const defaultName = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : 'spritesheet';
             try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-            const filenamePrompt = window.prompt('Export filename', defaultName + (exportMode === 'tiled' ? '.tmx' : extensionForFormat(exportFormat)));
+            const filenamePrompt = window.prompt('Export filename', defaultName + (exportMode === 'tiled' ? '.zip' : extensionForFormat(exportFormat)));
             // If the user cancelled the prompt (null), abort export and do not download.
             if (filenamePrompt === null) return;
-            const filename = filenamePrompt || (defaultName + (exportMode === 'tiled' ? '.tmx' : extensionForFormat(exportFormat)));
+            const filename = filenamePrompt || (defaultName + (exportMode === 'tiled' ? '.zip' : extensionForFormat(exportFormat)));
             // Prompt whether to also download metadata JSON. If confirmed, ask for a metadata filename.
             let wantMeta = false;
             let chosenMetaFilename = null;
@@ -1238,6 +1300,7 @@ export default class FrameSelect {
                 const mapFileName = baseName + '.tmx';
                 const tilesetFileName = baseName + '.tsx';
                 const imageFileName = baseName + '.png';
+                const zipFileName = baseName + '.zip';
 
                 const pngBlob = await new Promise((res) => exportCanvas.toBlob((b) => res(b), 'image/png'));
                 if (!pngBlob) {
@@ -1336,48 +1399,42 @@ export default class FrameSelect {
                     '</map>'
                 ].filter(Boolean).join('\n');
 
-                const tsxBlob = new Blob([tsx], { type: 'application/xml' });
-                const tmxBlob = new Blob([tmx], { type: 'application/xml' });
+                let zipBlob = null;
+                try {
+                    const JSZip = await this._getJsZipCtor();
+                    const archive = new JSZip();
+                    archive.file(mapFileName, tmx);
+                    archive.file(tilesetFileName, tsx);
+                    archive.file(imageFileName, pngBlob);
+                    zipBlob = await archive.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+                } catch (e) {
+                    console.warn('Failed to build tiled ZIP package', e);
+                    alert('Failed to build ZIP package for Tiled export.');
+                    return;
+                }
 
                 if (window.showSaveFilePicker) {
                     try {
-                        const tmxHandle = await window.showSaveFilePicker({ suggestedName: mapFileName, types: [{ description: 'Tiled TMX', accept: { 'application/xml': ['.tmx'] } }] });
-                        const tmxWritable = await tmxHandle.createWritable();
-                        await tmxWritable.write(tmxBlob);
-                        await tmxWritable.close();
-
-                        const tsxHandle = await window.showSaveFilePicker({ suggestedName: tilesetFileName, types: [{ description: 'Tiled TSX', accept: { 'application/xml': ['.tsx'] } }] });
-                        const tsxWritable = await tsxHandle.createWritable();
-                        await tsxWritable.write(tsxBlob);
-                        await tsxWritable.close();
-
-                        const imgHandle = await window.showSaveFilePicker({ suggestedName: imageFileName, types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }] });
-                        const imgWritable = await imgHandle.createWritable();
-                        await imgWritable.write(pngBlob);
-                        await imgWritable.close();
+                        const zipHandle = await window.showSaveFilePicker({ suggestedName: zipFileName, types: [{ description: 'ZIP Archive', accept: { 'application/zip': ['.zip'] } }] });
+                        const zipWritable = await zipHandle.createWritable();
+                        await zipWritable.write(zipBlob);
+                        await zipWritable.close();
                         return;
                     } catch (e) {
                         console.warn('tiled export save picker canceled/failed', e);
                     }
                 }
 
-                const dl = (blob, name, delay = 0) => {
-                    setTimeout(() => {
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = name;
-                        document.body.appendChild(a);
-                        a.click();
-                        setTimeout(() => {
-                            try { URL.revokeObjectURL(url); } catch (e) {}
-                            try { a.remove(); } catch (e) {}
-                        }, 1600);
-                    }, delay);
-                };
-                dl(tmxBlob, mapFileName, 0);
-                dl(tsxBlob, tilesetFileName, 250);
-                dl(pngBlob, imageFileName, 500);
+                const zipUrl = URL.createObjectURL(zipBlob);
+                const zipAnchor = document.createElement('a');
+                zipAnchor.href = zipUrl;
+                zipAnchor.download = zipFileName;
+                document.body.appendChild(zipAnchor);
+                zipAnchor.click();
+                setTimeout(() => {
+                    try { URL.revokeObjectURL(zipUrl); } catch (e) {}
+                    try { zipAnchor.remove(); } catch (e) {}
+                }, 1600);
                 return;
             }
 
@@ -1526,7 +1583,7 @@ export default class FrameSelect {
             // Hidden file input for import
             const inputPos = new Vector(-3000, -3000);
             this._importInput = createHInput('import-spritesheet-input', inputPos, new Vector(10,10), 'file', {}, uiCanvas.parentNode);
-            this._importInput.accept = 'image/*,.tmx,.tsx,.xml,text/xml,application/xml';
+            this._importInput.accept = 'image/*,.zip,.tmx,.tsx,.xml,text/xml,application/xml,application/zip';
             this._importInput.multiple = true;
             this._importInput.style.display = 'none';
 

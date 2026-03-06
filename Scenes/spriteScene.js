@@ -11170,7 +11170,7 @@ export class SpriteScene extends Scene {
                     const filled = this.keys.held('Alt');
                     const strokeWidth = this._getShapeStrokeWidth();
                     const circlePixels = this.computeCirclePixels(start, end, filled, strokeWidth) || [];
-                    for (const p of circlePixels) {
+   bvcxzabvgf                  for (const p of circlePixels) {
                         const cellX = dstPos.x + p.x * cellW;
                         const cellY = dstPos.y + p.y * cellH;
                         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
