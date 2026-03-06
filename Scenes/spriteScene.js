@@ -278,6 +278,19 @@ export class SpriteScene extends Scene {
                                     this._setAreaTransformAtIndex(idx, { rot: (t.rot || 0), flipH: !!t.flipH }, false);
                                 }
                             }
+                            if (Array.isArray(layout.waypoints)) {
+                                const waypointKeys = [];
+                                for (const wp of layout.waypoints) {
+                                    if (!wp) continue;
+                                    const c = Number(wp.col);
+                                    const r = Number(wp.row);
+                                    if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                                    waypointKeys.push(this._tileKey(c | 0, r | 0));
+                                }
+                                this._setWaypointKeys(waypointKeys, false, true);
+                            } else {
+                                this._setWaypointKeys([], false, true);
+                            }
                         }
                     } catch (e) { /* ignore tile layout restore errors */ }
 
@@ -1839,7 +1852,8 @@ export class SpriteScene extends Scene {
                 rows: Number(this.tileRows || 3),
                 activeTiles,
                 bindings,
-                transforms
+                transforms,
+                waypoints: this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row }))
             };
             this.modifyState(payload.enabled, false, false, ['tilemap', 'enabled']);
             this.modifyState(payload.cols, false, false, ['tilemap', 'cols']);
@@ -1847,6 +1861,7 @@ export class SpriteScene extends Scene {
             this.modifyState(payload.activeTiles, false, false, ['tilemap', 'activeTiles']);
             this.modifyState(payload.bindings, false, false, ['tilemap', 'bindings']);
             this.modifyState(payload.transforms, false, false, ['tilemap', 'transforms']);
+            this.modifyState(payload.waypoints, false, false, ['tilemap', 'waypoints']);
             return payload;
         } catch (e) {
             return null;
@@ -1936,12 +1951,24 @@ export class SpriteScene extends Scene {
                 }, false);
             }
 
+            const waypointKeys = [];
+            const incomingWaypoints = Array.isArray(tilemapState.waypoints) ? tilemapState.waypoints : [];
+            for (const wp of incomingWaypoints) {
+                if (!wp) continue;
+                const c = Number(wp.col);
+                const r = Number(wp.row);
+                if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                waypointKeys.push(this._tileKey(c | 0, r | 0));
+            }
+            this._setWaypointKeys(waypointKeys, false, true);
+
             this.modifyState(this.tilemode, false, false, ['tilemap', 'enabled']);
             this.modifyState(this.tileCols, false, false, ['tilemap', 'cols']);
             this.modifyState(this.tileRows, false, false, ['tilemap', 'rows']);
             this.modifyState(Array.from(this._tileActive.values()), false, false, ['tilemap', 'activeTiles']);
             this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
             this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
+            this.modifyState(this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row })), false, false, ['tilemap', 'waypoints']);
             return true;
         } catch (e) {
             console.warn('_applyTilemapState failed', e);
@@ -2276,7 +2303,13 @@ export class SpriteScene extends Scene {
                     if (mode.prevPasscode) this.keys.setPasscode(mode.prevPasscode);
                     else this.keys.resetPasscode();
                 } catch (e) {}
-                try { if (mode.prevOffset && mode.prevZoom) this._startCameraOffsetTween(mode.prevOffset.clone(), 0.35, mode.prevZoom.clone()); } catch (e) {}
+                try {
+                    // If Shift is held while exiting preview, keep current camera position/zoom.
+                    const shiftHeld = this.keys && (this.keys.held('Shift') || this.keys.held('ShiftLeft') || this.keys.held('ShiftRight'));
+                    if (!shiftHeld) {
+                        if (mode.prevOffset && mode.prevZoom) this._startCameraOffsetTween(mode.prevOffset.clone(), 0.35, mode.prevZoom.clone());
+                    }
+                } catch (e) {}
                 return true;
             }
 
@@ -2297,6 +2330,7 @@ export class SpriteScene extends Scene {
             mode.prevPasscode = this.keys.passcode || '';
             mode.prevOffset = this.offset && this.offset.clone ? this.offset.clone() : new Vector(0, 0);
             mode.prevZoom = this.zoom && this.zoom.clone ? this.zoom.clone() : new Vector(1, 1);
+            mode.lastWaypointKey = null;
             mode.active = true;
             mode.player = {
                 pos: spawn,
@@ -2334,9 +2368,33 @@ export class SpriteScene extends Scene {
 
             const dt = Math.max(0.001, Number(tickDelta) || 0.016);
             const pass = mode.passcode || '';
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
             if (this.keys.released('g', pass) || this.keys.released('G', pass)) {
                 player.gravityEnabled = !player.gravityEnabled;
                 if (!player.gravityEnabled) player.vlos.y = 0;
+            }
+
+            if (this.keys.released('i', pass) || this.keys.released('I', pass)) {
+                const waypoints = this._getWaypointCoords(false);
+                if (waypoints.length > 0) {
+                    const lastKey = String(mode.lastWaypointKey || '');
+                    let nextIndex = 0;
+                    if (lastKey) {
+                        const prevIndex = waypoints.findIndex((wp) => this._tileKey(wp.col, wp.row) === lastKey);
+                        if (prevIndex >= 0) nextIndex = (prevIndex + 1) % waypoints.length;
+                    }
+                    const target = waypoints[nextIndex];
+                    mode.lastWaypointKey = this._tileKey(target.col, target.row);
+                    player.pos = new Vector(
+                        (target.col * slice) + (slice - player.size.x) * 0.5,
+                        (target.row * slice) + (slice - player.size.y) * 0.5
+                    );
+                    player.vlos = new Vector(0, 0);
+                    player.onGround = false;
+                    player.coyoteTime = 0;
+                    player.fallLookTimer = 0;
+                    player.fallLookY = 0;
+                }
             }
 
             const left = !!(this.keys.held('a', false, pass) || this.keys.held('A', false, pass) || this.keys.held('ArrowLeft', false, pass));
@@ -2391,7 +2449,6 @@ export class SpriteScene extends Scene {
             let curStep = deltaStep.clone();
             let collidedBottom = false;
 
-            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
             const tileSize = new Vector(slice, slice);
             const centerX = curPos.x + player.size.x * 0.5;
             const centerY = curPos.y + player.size.y * 0.5;
@@ -2624,7 +2681,8 @@ export class SpriteScene extends Scene {
                 passcode: '__spriteScenePlayerSim__',
                 prevPasscode: '',
                 prevOffset: null,
-                prevZoom: null
+                prevZoom: null,
+                lastWaypointKey: null
             };
         }
         try { this._togglePlayerSimMode(); } catch (e) {}
@@ -4263,10 +4321,17 @@ export class SpriteScene extends Scene {
                 return true;
             }
 
-            // Keyframing: Shift+I for selection, I for frame (uses selection mask if present)
+            // In tilemode, 'i' toggles a waypoint at the hovered tile.
+            if (this.tilemode && (this.keys.released('i') || this.keys.released('I')) && !this.keys.held('Alt')) {
+                this._toggleWaypointAtCursor(pos);
+            }
+
+            // Keyframing: Shift+I for selection, I for frame (non-tilemode only)
             if ((this.keys.released('i') || this.keys.released('I')) && !this.keys.held('Alt')) {
-                if (this.keys.held('Shift')) this._handleSelectionKeyframeTap();
-                else this._handleFrameKeyframeTap();
+                if (!this.tilemode) {
+                    if (this.keys.held('Shift')) this._handleSelectionKeyframeTap();
+                    else this._handleFrameKeyframeTap();
+                }
             }
 
             // Ctrl + Left = eyedropper: pick color from the current frame under the mouse
@@ -7578,6 +7643,7 @@ export class SpriteScene extends Scene {
                     layout.bindings = [];
                     layout.transforms = [];
                     layout.activeTiles = [];
+                    layout.waypoints = this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row }));
                     if (this._tileActive && this._tileActive.size > 0) {
                         for (const key of this._tileActive.values()) {
                             const c = this._parseTileKey(key);
@@ -8455,6 +8521,8 @@ export class SpriteScene extends Scene {
                     }
                 }
 
+                if (pending.waypoint !== undefined) compact.w = pending.waypoint ? 1 : 0;
+
                 entries.push(compact);
             }
 
@@ -8743,6 +8811,10 @@ export class SpriteScene extends Scene {
                             } else if (op.action === 'clearTransform') {
                                 const idx = this._getAreaIndexForCoord(c, r);
                                 this._setAreaTransformAtIndex(idx, null, false);
+                            } else if (op.action === 'setWaypoint') {
+                                this._setWaypointAtTile(c, r, false);
+                            } else if (op.action === 'clearWaypoint') {
+                                this._removeWaypointAtTile(c, r, false);
                             }
                             applied++;
                         } catch (e) { /* ignore tile op errors */ }
@@ -8790,6 +8862,11 @@ export class SpriteScene extends Scene {
                                             flipH: !!(t.f !== undefined ? Number(t.f) : t.flipH)
                                         }, false);
                                     }
+                                }
+
+                                if (tile.w !== undefined) {
+                                    if (Number(tile.w) === 1) this._setWaypointAtTile(col, row, false);
+                                    else if (Number(tile.w) === 0) this._removeWaypointAtTile(col, row, false);
                                 }
                             }
                             applied++;
@@ -9036,6 +9113,7 @@ export class SpriteScene extends Scene {
             if (this._tileActive && this._tileActive.size > 0) {
                 snap.activeTiles = Array.from(this._tileActive.values()).map(k => this._parseTileKey(k)).filter(Boolean);
             }
+            snap.waypoints = this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row }));
             if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
             try {
                 const layer = this._normalizeSpriteLayerState();
@@ -9145,6 +9223,19 @@ export class SpriteScene extends Scene {
                 }
             } else {
                 this._seedTileActives(this.tileCols, this.tileRows);
+            }
+            if (Array.isArray(snapshot.waypoints)) {
+                const waypointKeys = [];
+                for (const wp of snapshot.waypoints) {
+                    if (!wp) continue;
+                    const c = Number(wp.col);
+                    const r = Number(wp.row);
+                    if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                    waypointKeys.push(this._tileKey(c | 0, r | 0));
+                }
+                this._setWaypointKeys(waypointKeys, false, true);
+            } else {
+                this._setWaypointKeys([], false, true);
             }
             if (Array.isArray(snapshot.bindings)) {
                 this._areaBindings = [];
@@ -9280,6 +9371,8 @@ export class SpriteScene extends Scene {
                 ? Array.from(this._tileSelection).sort()
                 : [];
 
+            const waypoints = this._getWaypointCoords(false).map((wp) => ({ col: wp.col | 0, row: wp.row | 0 }));
+
             return {
                 tilemode: !!this.tilemode,
                 tileCols: Number(this.tileCols) | 0,
@@ -9287,6 +9380,7 @@ export class SpriteScene extends Scene {
                 activeTiles,
                 bindings,
                 transforms,
+                waypoints,
                 selectionPoints,
                 selectionRegion,
                 tileSelection
@@ -9522,6 +9616,24 @@ export class SpriteScene extends Scene {
                     this._queueTileOp('clearTransform', { col: c.col | 0, row: c.row | 0 });
                 }
             }
+
+            const fromWaypoints = new Set((Array.isArray(fromState.waypoints) ? fromState.waypoints : [])
+                .map((w) => this._tileKey(Number(w && w.col) | 0, Number(w && w.row) | 0)));
+            const toWaypoints = new Set((Array.isArray(toState.waypoints) ? toState.waypoints : [])
+                .map((w) => this._tileKey(Number(w && w.col) | 0, Number(w && w.row) | 0)));
+
+            for (const key of fromWaypoints) {
+                if (toWaypoints.has(key)) continue;
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                this._queueTileOp('clearWaypoint', { col: c.col | 0, row: c.row | 0 });
+            }
+
+            for (const key of toWaypoints) {
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                this._queueTileOp('setWaypoint', { col: c.col | 0, row: c.row | 0 });
+            }
             return true;
         } catch (e) {
             return false;
@@ -9568,6 +9680,17 @@ export class SpriteScene extends Scene {
                 const idx = Number(t.i) | 0;
                 this._areaTransforms[idx] = { rot: Number(t.rot || 0) | 0, flipH: !!t.flipH };
             }
+
+            const waypointKeys = [];
+            const waypoints = Array.isArray(state.waypoints) ? state.waypoints : [];
+            for (const wp of waypoints) {
+                if (!wp) continue;
+                const c = Number(wp.col);
+                const r = Number(wp.row);
+                if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                waypointKeys.push(this._tileKey(c | 0, r | 0));
+            }
+            this._setWaypointKeys(waypointKeys, false, true);
 
             this.selectionPoints = Array.isArray(state.selectionPoints)
                 ? state.selectionPoints.map((p) => ({
@@ -10287,6 +10410,141 @@ export class SpriteScene extends Scene {
         return { col: c|0, row: r|0 };
     }
 
+    _normalizeWaypointKeyList(rawList) {
+        try {
+            if (!Array.isArray(rawList)) return [];
+            const out = [];
+            const seen = new Set();
+            for (const entry of rawList) {
+                let key = null;
+                if (typeof entry === 'string') {
+                    key = this._parseTileKey(entry) ? entry : null;
+                } else if (entry && typeof entry === 'object') {
+                    const c = Number(entry.col);
+                    const r = Number(entry.row);
+                    if (Number.isFinite(c) && Number.isFinite(r)) key = this._tileKey(c | 0, r | 0);
+                }
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                out.push(key);
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _getWaypointKeys() {
+        try {
+            if (!this.state || !this.state.tilemap || !Array.isArray(this.state.tilemap.waypoints)) {
+                this.modifyState([], false, false, ['tilemap', 'waypoints']);
+                return [];
+            }
+            const normalized = this._normalizeWaypointKeyList(this.state.tilemap.waypoints);
+            if (normalized.length !== this.state.tilemap.waypoints.length
+                || normalized.some((v, i) => v !== this.state.tilemap.waypoints[i])) {
+                this.modifyState(normalized, false, false, ['tilemap', 'waypoints']);
+            }
+            return normalized;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _setWaypointKeys(keys, syncOp = true, persistState = true) {
+        try {
+            const next = this._normalizeWaypointKeyList(keys);
+            const prev = this._getWaypointKeys();
+            const prevSet = new Set(prev);
+            const nextSet = new Set(next);
+
+            if (persistState) this.modifyState(next, false, false, ['tilemap', 'waypoints']);
+
+            if (syncOp) {
+                for (const key of prevSet) {
+                    if (nextSet.has(key)) continue;
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('clearWaypoint', { col: c.col | 0, row: c.row | 0 });
+                }
+                for (const key of nextSet) {
+                    if (prevSet.has(key)) continue;
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('setWaypoint', { col: c.col | 0, row: c.row | 0 });
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _setWaypointAtTile(col, row, syncOp = true) {
+        try {
+            const key = this._tileKey(col, row);
+            const keys = this._getWaypointKeys();
+            if (keys.includes(key)) return false;
+            keys.push(key);
+            this._setWaypointKeys(keys, syncOp, true);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _removeWaypointAtTile(col, row, syncOp = true) {
+        try {
+            const key = this._tileKey(col, row);
+            const keys = this._getWaypointKeys();
+            const idx = keys.indexOf(key);
+            if (idx < 0) return false;
+            keys.splice(idx, 1);
+            this._setWaypointKeys(keys, syncOp, true);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _toggleWaypointAtTile(col, row, syncOp = true) {
+        try {
+            return this._removeWaypointAtTile(col, row, syncOp) ? false : this._setWaypointAtTile(col, row, syncOp);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _toggleWaypointAtCursor(posHint = null) {
+        try {
+            if (!this.tilemode) return false;
+            const pos = posHint || this.getPos(this.mouse && this.mouse.pos);
+            if (!pos || (!pos.renderOnly && !pos.inside)) return false;
+            const c = Number(pos.tileCol);
+            const r = Number(pos.tileRow);
+            if (!Number.isFinite(c) || !Number.isFinite(r)) return false;
+            return this._toggleWaypointAtTile(c | 0, r | 0, true);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getWaypointCoords(activeOnly = false) {
+        try {
+            const keys = this._getWaypointKeys();
+            const out = [];
+            for (const key of keys) {
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                if (activeOnly && !this._isTileActive(c.col, c.row)) continue;
+                out.push(c);
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    }
+
     _getAreaIndexForCoord(col, row) {
         const key = this._tileKey(col, row);
         if (this._tileCoordToIndex.has(key)) return this._tileCoordToIndex.get(key);
@@ -10369,6 +10627,7 @@ export class SpriteScene extends Scene {
         try {
             const key = this._tileKey(col, row);
             if (this._tileActive) this._tileActive.delete(key);
+            this._removeWaypointAtTile(col, row, syncOp);
             this._tileActiveVersion = (Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0) + 1;
             const idx = this._tileCoordToIndex ? this._tileCoordToIndex.get(key) : null;
             if (Number.isFinite(idx)) {
@@ -10415,6 +10674,10 @@ export class SpriteScene extends Scene {
                 };
             } else if (action === 'clearTransform') {
                 pending.transform = null;
+            } else if (action === 'setWaypoint') {
+                pending.waypoint = true;
+            } else if (action === 'clearWaypoint') {
+                pending.waypoint = false;
             } else {
                 return false;
             }
@@ -12188,6 +12451,26 @@ export class SpriteScene extends Scene {
                     }
                 }
             } catch (e) { /* ignore selection draw errors */ }
+
+            // Draw waypoint markers.
+            try {
+                const waypoints = this._getWaypointCoords(false);
+                if (waypoints.length > 0) {
+                    const bounds = this._getVisibleTileBounds(basePos, tileSize, 1);
+                    const markerFill = '#00E5FF88';
+                    const markerStroke = '#00E5FFFF';
+                    const markerStrokeW = Math.max(1, Math.round(Math.min(tileSize.x, tileSize.y) * 0.02));
+                    for (const wp of waypoints) {
+                        if (wp.col < bounds.minCol || wp.col > bounds.maxCol || wp.row < bounds.minRow || wp.row > bounds.maxRow) continue;
+                        const topLeft = this._tileCoordToPos(wp.col, wp.row, basePos, tileSize);
+                        const center = new Vector(topLeft.x + tileSize.x * 0.5, topLeft.y + tileSize.y * 0.5);
+                        const markerSize = new Vector(Math.max(5, tileSize.x * 0.34), Math.max(5, tileSize.y * 0.34));
+                        const markerPos = new Vector(center.x - markerSize.x * 0.5, center.y - markerSize.y * 0.5);
+                        this.Draw.rect(markerPos, markerSize, markerFill, true);
+                        this.Draw.rect(markerPos, markerSize, null, false, true, markerStrokeW, markerStroke);
+                    }
+                }
+            } catch (e) { /* ignore waypoint draw errors */ }
 
             // Tile cursor (single rect matching brush footprint) — only draw when anchor area is renderOnly
             if (anchor) {

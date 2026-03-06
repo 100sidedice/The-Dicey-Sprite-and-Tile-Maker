@@ -104,7 +104,8 @@ export function initializeSpriteSceneState(scene, currentSprite) {
             rows: 3,
             activeTiles: [],
             bindings: [],
-            transforms: []
+            transforms: [],
+            waypoints: []
         },
         spriteLayer: {
             selectedAnimation: null,
