@@ -12770,7 +12770,7 @@ export class SpriteScene extends Scene {
         } catch (e) {
             return false;
         }
-    }
+    }//
 
     _remapAnimationFrameReferences(animName, oldToNew, options = {}) {
         try {
