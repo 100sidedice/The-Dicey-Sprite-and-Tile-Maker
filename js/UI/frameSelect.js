@@ -7,8 +7,6 @@ import UISlider from './Slider.js';
 import Geometry from '../Geometry.js';
 import UITextInput from './UITextInput.js';
 import SpriteSheet from '../Spritesheet.js';
-import createHButton from '../htmlElements/createHButton.js';
-import createHInput from '../htmlElements/createHInput.js';
 
 export default class FrameSelect {
     constructor(scene,sprite, mouse, keys, UIDraw, layer = 1) {
@@ -28,6 +26,7 @@ export default class FrameSelect {
         this._previewBuffer = 16;
         this._listYOffset = 86;
         this._rightListMode = 'animations'; // 'animations' | 'layers'
+        this._animListCollapsedByBase = {};
         this._animName = null;
         // multi-frame selection (store indices)
         this._multiSelected = new Set();
@@ -488,6 +487,48 @@ export default class FrameSelect {
         } catch (e) {
             return 'pixel';
         }
+    }
+
+    _buildAnimationListRows(){
+        const names = this._getAnimationNames();
+        const rows = [];
+        if (!Array.isArray(names) || names.length === 0) return rows;
+
+        const nameSet = new Set(names);
+        const isChildName = (n) => {
+            const i = String(n || '').indexOf('-');
+            if (i <= 0) return false;
+            const base = String(n).slice(0, i);
+            return nameSet.has(base);
+        };
+
+        const emittedChildren = new Set();
+        for (const name of names) {
+            if (emittedChildren.has(name)) continue;
+            const base = String(name || '').trim();
+            if (!base) continue;
+            if (isChildName(base)) continue;
+
+            const children = names.filter((n) => n !== base && String(n).startsWith(base + '-'));
+            const hasChildren = children.length > 0;
+
+            if (hasChildren && !isChildName(base)) {
+                const collapsed = Object.prototype.hasOwnProperty.call(this._animListCollapsedByBase, base)
+                    ? !!this._animListCollapsedByBase[base]
+                    : true;
+                rows.push({ kind: 'anim-parent', animName: base, displayName: base, baseName: base, hasChildren: true, collapsed });
+                if (!collapsed) {
+                    for (const child of children) {
+                        rows.push({ kind: 'anim-child', animName: child, displayName: child, baseName: base, hasChildren: false, collapsed: false });
+                        emittedChildren.add(child);
+                    }
+                }
+            } else {
+                rows.push({ kind: 'anim', animName: base, displayName: base, baseName: null, hasChildren: false, collapsed: false });
+            }
+        }
+
+        return rows;
     }
 
     _getPreviewFrameCanvas(anim, frameIdx){
@@ -2814,34 +2855,34 @@ export default class FrameSelect {
         try{
             const uiCanvas = document.getElementById('UI');
             if (!uiCanvas || !uiCanvas.parentNode) return;
-            // Button positions: ~300px left from right edge (1920 - 300 = 1620)
-            const importPos = new Vector(1480, this._previewBuffer + 4);
-            const btnSize = new Vector(140, 28);
-            this._importBtn = createHButton('import-spritesheet-btn', importPos, btnSize, '#334455', { color: '#fff', borderRadius: '4px', fontSize: 14 }, uiCanvas.parentNode);
-            this._importBtn.textContent = 'Import Spritesheet';
-
-            const exportPos = new Vector(1480, this._previewBuffer + 4 + btnSize.y + 6);
-            this._exportBtn = createHButton('export-spritesheet-btn', exportPos, btnSize, '#225522', { color: '#fff', borderRadius: '4px', fontSize: 14 }, uiCanvas.parentNode);
-            this._exportBtn.textContent = 'Export Spritesheet';
-
-            // Hidden file input for import
-            const inputPos = new Vector(-3000, -3000);
-            this._importInput = createHInput('import-spritesheet-input', inputPos, new Vector(10,10), 'file', {}, uiCanvas.parentNode);
+            // Hidden file input for import. Import/Export buttons are drawn in-canvas
+            // and handled in update() so they do not steal editor input focus.
+            this._importInput = document.createElement('input');
+            this._importInput.type = 'file';
+            this._importInput.id = 'import-spritesheet-input';
             this._importInput.accept = 'image/*,.zip,.tmx,.tsx,.xml,text/xml,application/xml,application/zip';
             this._importInput.multiple = true;
             this._importInput.style.display = 'none';
+            uiCanvas.parentNode.appendChild(this._importInput);
 
-            this._importBtn.addEventListener('click', ()=>{ this._importInput.click(); });
             this._importInput.addEventListener('change', (ev)=>{ this._handleImportFile(ev); });
-            this._exportBtn.addEventListener('click', ()=>{ this._handleExport(); });
         } catch (e) { console.warn('createImportExportUI failed', e); }
+    }
+
+    _getImportExportButtonLayout(){
+        const importPos = new Vector(1480, this._previewBuffer + 4);
+        const btnSize = new Vector(140, 28);
+        const exportPos = new Vector(1480, this._previewBuffer + 4 + btnSize.y + 6);
+        return {
+            importPos,
+            exportPos,
+            btnSize
+        };
     }
 
     // Dispose UI-created DOM elements to allow GC when this component is destroyed
     dispose(){
         try {
-            if (this._importBtn && this._importBtn.parentNode) { try { this._importBtn.remove(); } catch(e){} }
-            if (this._exportBtn && this._exportBtn.parentNode) { try { this._exportBtn.remove(); } catch(e){} }
             if (this._importInput && this._importInput.parentNode) { try { this._importInput.remove(); } catch(e){} }
         } catch (e) { console.warn('FrameSelect.dispose failed', e); }
         this._importBtn = null; this._exportBtn = null; this._importInput = null;
@@ -2849,6 +2890,22 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
+
+        try {
+            if (this.mouse && this.mouse.released && this.mouse.released('left')) {
+                const layout = this._getImportExportButtonLayout();
+                if (Geometry.pointInRect(this.mouse.pos, layout.importPos, layout.btnSize)) {
+                    try { if (this._importInput) this._importInput.click(); } catch (e) {}
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    return;
+                }
+                if (Geometry.pointInRect(this.mouse.pos, layout.exportPos, layout.btnSize)) {
+                    try { this._handleExport(); } catch (e) {}
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    return;
+                }
+            }
+        } catch (e) {}
 
         // Absorb input when cursor is over FrameSelect UI so map/tile tools don't also process click/drag.
         try {
@@ -3644,16 +3701,16 @@ export default class FrameSelect {
 
         // animation list interactions (click/select/rename/remove/add)
         try{
-            // compute list position same as draw
             const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
             const contentPos = outerPos.clone().add(new Vector(this._previewBuffer, this._previewBuffer));
             const contentSize = new Vector(this._previewSize, this._previewSize);
             const listX = contentPos.x;
             const listY = contentPos.y + contentSize.y + 8 + this._listYOffset;
             const rowH = 28;
-            const names = (this._rightListMode === 'layers')
-                ? ((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(this._resolveLayerListType()) : [])
-                : this._getAnimationNames();
+            const rows = (this._rightListMode === 'layers')
+                ? (((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(this._resolveLayerListType()) : []).map((n, idx) => ({ kind: 'layer', layerIndex: idx, displayName: n })))
+                : this._buildAnimationListRows();
+
             if (this.mouse && this.mouse.released && this.mouse.released('left')){
                 const btnY = listY - 34;
                 const btnGap = 6;
@@ -3674,9 +3731,10 @@ export default class FrameSelect {
                     return;
                 }
 
-                // iterate rows
-                for (let i = 0; i < names.length; i++){
-                    const name = names[i];
+                for (let i = 0; i < rows.length; i++){
+                    const row = rows[i] || {};
+                    const name = String(row.displayName || '');
+                    const animName = String(row.animName || name || '');
                     const ry = listY + i * rowH;
                     const rpos = new Vector(listX, ry);
                     const rsize = new Vector(contentSize.x, rowH - 2);
@@ -3687,84 +3745,82 @@ export default class FrameSelect {
                         if (this._rightListMode === 'layers') {
                             try {
                                 const layerType = this._resolveLayerListType();
-                                if (this.scene && typeof this.scene.moveLayerDown === 'function') {
-                                    this.scene.moveLayerDown(layerType, i);
-                                }
+                                if (this.scene && typeof this.scene.moveLayerDown === 'function') this.scene.moveLayerDown(layerType, i);
                             } catch (e) {}
                         } else {
-                            try { this.moveAnimationDown(name); } catch (e) {}
+                            try { this.moveAnimationDown(animName); } catch (e) {}
                         }
                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
                         break;
                     }
 
-                    if (Geometry.pointInRect(this.mouse.pos, rpos, rsize)){
-                        // determine button hit areas (right side)
-                        const visRect = new Vector(rpos.x + rsize.x - 120, rpos.y + 4);
-                        const visSize = new Vector(36, rsize.y - 8);
-                        const renameRect = new Vector(rpos.x + rsize.x - 80, rpos.y + 4);
-                        const renameSize = new Vector(36, rsize.y - 8);
-                        const removeRect = new Vector(rpos.x + rsize.x - 40, rpos.y + 4);
-                        const removeSize = new Vector(36, rsize.y - 8);
-                        if (this._rightListMode === 'layers' && Geometry.pointInRect(this.mouse.pos, visRect, visSize)) {
+                    if (!Geometry.pointInRect(this.mouse.pos, rpos, rsize)) continue;
+
+                    const visRect = new Vector(rpos.x + rsize.x - 120, rpos.y + 4);
+                    const visSize = new Vector(36, rsize.y - 8);
+                    const renameRect = new Vector(rpos.x + rsize.x - 80, rpos.y + 4);
+                    const renameSize = new Vector(36, rsize.y - 8);
+                    const removeRect = new Vector(rpos.x + rsize.x - 40, rpos.y + 4);
+                    const removeSize = new Vector(36, rsize.y - 8);
+
+                    if (this._rightListMode === 'layers' && Geometry.pointInRect(this.mouse.pos, visRect, visSize)) {
+                        try {
+                            const layerType = this._resolveLayerListType();
+                            if (this.scene && typeof this.scene.cycleLayerVisibility === 'function') this.scene.cycleLayerVisibility(layerType, i);
+                        } catch (e) {}
+                    } else if (Geometry.pointInRect(this.mouse.pos, renameRect, renameSize)) {
+                        if (this._rightListMode === 'layers') {
                             try {
                                 const layerType = this._resolveLayerListType();
-                                if (this.scene && typeof this.scene.cycleLayerVisibility === 'function') {
-                                    this.scene.cycleLayerVisibility(layerType, i);
-                                }
+                                const nextName = window.prompt('Rename layer', String(name || ''));
+                                if (nextName !== null && this.scene && typeof this.scene.renameLayer === 'function') this.scene.renameLayer(layerType, i, nextName);
                             } catch (e) {}
-                        } else if (Geometry.pointInRect(this.mouse.pos, renameRect, renameSize)){
-                            if (this._rightListMode === 'layers') {
-                                try {
-                                    const layerType = this._resolveLayerListType();
-                                    const nextName = window.prompt('Rename layer', String(name || ''));
-                                    if (nextName !== null && this.scene && typeof this.scene.renameLayer === 'function') {
-                                        this.scene.renameLayer(layerType, i, nextName);
-                                    }
-                                } catch (e) {}
-                            } else {
-                                this._spawnTextInputFor(name);
-                            }
-                        } else if (Geometry.pointInRect(this.mouse.pos, removeRect, removeSize)){
-                            if (this._rightListMode === 'layers') {
-                                try {
-                                    const layerType = this._resolveLayerListType();
-                                    if (this.scene && typeof this.scene.removeLayer === 'function') {
-                                        this.scene.removeLayer(layerType, i);
-                                    }
-                                } catch (e) {}
-                            } else {
-                                this.removeAnimation(name);
-                            }
                         } else {
-                            if (this._rightListMode === 'layers') {
-                                try {
-                                    const layerType = this._resolveLayerListType();
-                                    if (this.scene && typeof this.scene.setActiveLayerIndex === 'function') {
-                                        this.scene.setActiveLayerIndex(layerType, i);
-                                    }
-                                } catch (e) {}
+                            this._spawnTextInputFor(animName);
+                        }
+                    } else if (Geometry.pointInRect(this.mouse.pos, removeRect, removeSize)) {
+                        if (this._rightListMode === 'layers') {
+                            try {
+                                const layerType = this._resolveLayerListType();
+                                if (this.scene && typeof this.scene.removeLayer === 'function') this.scene.removeLayer(layerType, i);
+                            } catch (e) {}
+                        } else {
+                            this.removeAnimation(animName);
+                        }
+                    } else {
+                        if (this._rightListMode === 'layers') {
+                            try {
+                                const layerType = this._resolveLayerListType();
+                                if (this.scene && typeof this.scene.setActiveLayerIndex === 'function') this.scene.setActiveLayerIndex(layerType, i);
+                            } catch (e) {}
+                        } else {
+                            const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                            if (shiftHeld) {
+                                if (this.scene && typeof this.scene._setSpritePlacementAnimation === 'function') this.scene._setSpritePlacementAnimation(animName);
+                                else if (this.scene) this.scene.selectedSpriteAnimation = animName;
                             } else {
-                                const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
-                                if (shiftHeld) {
-                                    if (this.scene && typeof this.scene._setSpritePlacementAnimation === 'function') this.scene._setSpritePlacementAnimation(name);
-                                    else if (this.scene) this.scene.selectedSpriteAnimation = name;
+                                const isParent = row.kind === 'anim-parent' && !!row.hasChildren;
+                                const isSelected = !!(this.scene && this.scene.selectedAnimation === animName);
+                                if (isParent) {
+                                    if (!isSelected) {
+                                        if (this.scene) this.scene.selectedAnimation = animName;
+                                    } else {
+                                        this._animListCollapsedByBase[animName] = !row.collapsed;
+                                    }
                                 } else {
-                                    // select animation
-                                    if (this.scene) this.scene.selectedAnimation = name;
-                                    // clear any multi-frame selection when switching animations
-                                    if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
-                                    // materialize frames for the selected animation (lazy-load)
-                                    try { if (this.sprite && typeof this.sprite._materializeAnimation === 'function') this.sprite._materializeAnimation(name); } catch(e) {}
+                                    if (this.scene) this.scene.selectedAnimation = animName;
                                 }
+                                if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
+                                try { if (this.sprite && typeof this.sprite._materializeAnimation === 'function') this.sprite._materializeAnimation(animName); } catch(e) {}
                             }
                         }
-                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
-                        break;
                     }
+
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    break;
                 }
-                // add button below
-                const addY = listY + names.length * rowH + 6;
+
+                const addY = listY + rows.length * rowH + 6;
                 const addPos = new Vector(listX, addY);
                 const addSize = new Vector(contentSize.x, 28);
                 if (Geometry.pointInRect(this.mouse.pos, addPos, addSize)){
@@ -3931,6 +3987,13 @@ export default class FrameSelect {
 
         // draw the menu and its children
         this.menu.draw(this.UIDraw);
+        try {
+            const layout = this._getImportExportButtonLayout();
+            this.UIDraw.rect(layout.importPos, layout.btnSize, '#334455');
+            this.UIDraw.text('Import Spritesheet', new Vector(layout.importPos.x + layout.btnSize.x/2, layout.importPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+            this.UIDraw.rect(layout.exportPos, layout.btnSize, '#225522');
+            this.UIDraw.text('Export Spritesheet', new Vector(layout.exportPos.x + layout.btnSize.x/2, layout.exportPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+        } catch (e) {}
         // draw animation list under preview
         try{
             const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
@@ -3940,9 +4003,9 @@ export default class FrameSelect {
             const listY = contentPos.y + contentSize.y + 8 + this._listYOffset;
             const rowH = 28;
             const listLayerType = this._resolveLayerListType();
-            const names = (this._rightListMode === 'layers')
-                ? ((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(listLayerType) : [])
-                : this._getAnimationNames();
+            const rows = (this._rightListMode === 'layers')
+                ? (((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(listLayerType) : []).map((n, idx) => ({ kind: 'layer', layerIndex: idx, displayName: n })))
+                : this._buildAnimationListRows();
 
             const btnY = listY - 34;
             const btnGap = 6;
@@ -3958,20 +4021,32 @@ export default class FrameSelect {
             this.UIDraw.rect(layerBtnPos, btnSize, layerActive ? '#4477AA' : '#2B2B2B');
             this.UIDraw.text('Layers', new Vector(layerBtnPos.x + btnSize.x / 2, layerBtnPos.y + btnSize.y / 2 + 5), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
 
-            for (let i = 0; i < names.length; i++){
-                const name = names[i];
+            for (let i = 0; i < rows.length; i++){
+                const row = rows[i] || {};
+                const name = String(row.displayName || '');
+                const animName = String(row.animName || name || '');
                 const ry = listY + i * rowH;
                 const rpos = new Vector(listX, ry);
                 const rsize = new Vector(contentSize.x, rowH - 2);
                 // background
                 const isSel = (this._rightListMode === 'layers')
                     ? ((this.scene && typeof this.scene.getActiveLayerIndex === 'function') ? (this.scene.getActiveLayerIndex(listLayerType) === i) : false)
-                    : (this.scene && this.scene.selectedAnimation === name);
+                    : (this.scene && this.scene.selectedAnimation === animName);
                 this.UIDraw.rect(rpos, rsize, isSel ? '#333344' : '#222222');
-                const isSpriteSel = !!(this.scene && this.scene.selectedSpriteAnimation === name);
+                const isSpriteSel = !!(this.scene && this.scene.selectedSpriteAnimation === animName);
                 if (this._rightListMode !== 'layers' && isSpriteSel) this.UIDraw.rect(rpos, rsize, '#00AA6633');
                 // name text
-                this.UIDraw.text(String(name), new Vector(rpos.x + 8, rpos.y + rsize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
+                let label = String(name);
+                let textX = rpos.x + 8;
+                if (this._rightListMode !== 'layers') {
+                    if (row.kind === 'anim-parent' && row.hasChildren) {
+                        label = (row.collapsed ? '> ' : 'v ') + label;
+                    } else if (row.kind === 'anim-child') {
+                        label = '- ' + label;
+                        textX = rpos.x;
+                    }
+                }
+                this.UIDraw.text(label, new Vector(textX, rpos.y + rsize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'left', baseline: 'middle', font: 'monospace' });
                 // layer visibility button (layers mode only)
                 const visPos = new Vector(rpos.x + rsize.x - 120, rpos.y + 4);
                 const visSize = new Vector(36, rsize.y - 8);
@@ -4003,7 +4078,7 @@ export default class FrameSelect {
                 this.UIDraw.text('v', new Vector(movePos.x + moveSize.x/2, movePos.y + moveSize.y/2 + 6), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
             }
             // add button
-            const addY = listY + names.length * rowH + 6;
+            const addY = listY + rows.length * rowH + 6;
             const addPos = new Vector(listX, addY);
             const addSize = new Vector(contentSize.x, 28);
             this.UIDraw.rect(addPos, addSize, '#225522');
