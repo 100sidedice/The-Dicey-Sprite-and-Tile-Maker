@@ -29,39 +29,44 @@ export class SpriteScene extends Scene {
         this._frameMousePosInfo = null;
         this._drawAreaIndexMap = new Map();
         this._renderScratchCanvases = Object.create(null);
+        this._renderOnlyFrameCache = new Map();
+        this._renderOnlyEntryCache = new Map();
+        this._renderOnlyAreas = [];
+        this._renderOnlyHoverArea = {
+            topLeft: new Vector(0, 0),
+            size: null,
+            padding: 0,
+            dstW: 0,
+            dstH: 0,
+            dstPos: new Vector(0, 0),
+            renderOnly: true,
+            areaIndex: 0,
+            tileCol: 0,
+            tileRow: 0,
+            active: false
+        };
+        this._mainDrawSize = new Vector(384, 384);
+        this._mainDrawCenter = new Vector(0, 0);
+        this._mainDrawBasePos = new Vector(0, 0);
+        this._tileBrushTilesBuffer = [];
+        this._tileBrushStackBuffer = [];
+        this._worldPixelBrushBuffer = [];
+        this._worldPixelDedupSet = new Set();
+        this._paintBindingCache = new Map();
+        this._autotileNeighborCoordSet = new Set();
+        this._autotileNeighborDeltas = [
+            [0, 0],
+            [0, -1], [1, 0], [0, 1], [-1, 0],
+            [-1, -1], [1, -1], [1, 1], [-1, 1]
+        ];
     }
 
     onReady() {
         this.maskShapesWithSelection = false;
 
-        try {
-            this._getCheckerboardCanvas(384, 384);
-        } catch (e) {}
-
+        this._getCheckerboardCanvas(384, 384);
 
         this.currentSprite = SpriteSheet.createNew(16, 'idle');
-        this.currentSprite.insertFrame('idle',1)
-        // Quick test paint: draw a small emoji-like face into the first idle frame
-        try {
-            const frame = this.currentSprite.getFrame('idle', 0);
-            if (frame) {
-                const fctx = frame.getContext('2d');
-                // clear transparent
-                fctx.clearRect(0, 0, frame.width, frame.height);
-                // orange face
-                fctx.fillStyle = '#FFAA33';
-                fctx.fillRect(1, 1, frame.width - 2, frame.height - 2);
-                // eyes
-                fctx.fillStyle = '#000000';
-                fctx.fillRect(4, 4, 2, 2);
-                fctx.fillRect(10, 4, 2, 2);
-                // mouth
-                fctx.fillRect(6, 10, 4, 1);
-            }
-            // rebuild the packed sheet so Draw.sheet picks up the change
-            if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas();
-        } catch (e) { console.warn('failed to paint test frame', e); }
-
 
 
         // --- Multiplayer edit buffering / hooks ---
@@ -4034,8 +4039,10 @@ export class SpriteScene extends Scene {
 
             try {
 
-            const worldPixelsFromBrush = (sx, sy) => {
-                const pixels = [];
+            const worldPixelsFromBrush = (sx, sy, outPixels = null) => {
+                const pixels = Array.isArray(outPixels) ? outPixels : [];
+                pixels.length = 0;
+                let write = 0;
                 const pushWorld = (lx, ly) => {
                     // In tilemode, allow brush footprints to spill across tiles; in single-frame mode, drop out-of-bounds.
                     if (!this.tilemode && frameW !== null && frameH !== null) {
@@ -4044,20 +4051,42 @@ export class SpriteScene extends Scene {
                     if (this.isPixelMasked(lx, ly, areaIndexForPos)) return;
                     const wx = baseCol * slice + lx;
                     const wy = baseRow * slice + ly;
-                    pixels.push({ x: wx, y: wy });
+                    let entry = pixels[write];
+                    if (!entry) {
+                        entry = { x: 0, y: 0 };
+                        pixels[write] = entry;
+                    }
+                    entry.x = wx;
+                    entry.y = wy;
+                    write++;
                 };
                 const addMirrored = (lx, ly) => {
-                    const coords = [];
-                    coords.push({ x: lx, y: ly });
-                    if (mirrorH && frameW !== null) coords.push({ x: frameW - 1 - lx, y: ly });
-                    if (mirrorV && frameH !== null) coords.push({ x: lx, y: frameH - 1 - ly });
-                    if (mirrorH && mirrorV && frameW !== null && frameH !== null) coords.push({ x: frameW - 1 - lx, y: frameH - 1 - ly });
-                    const seen = new Set();
-                    for (const c of coords) {
-                        const key = c.x + ',' + c.y;
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        pushWorld(c.x, c.y);
+                    const x1 = lx;
+                    const y1 = ly;
+                    pushWorld(x1, y1);
+
+                    let x2 = null, y2 = null;
+                    let x3 = null, y3 = null;
+
+                    if (mirrorH && frameW !== null) {
+                        x2 = frameW - 1 - lx;
+                        y2 = y1;
+                        if (!(x2 === x1 && y2 === y1)) pushWorld(x2, y2);
+                    }
+
+                    if (mirrorV && frameH !== null) {
+                        x3 = x1;
+                        y3 = frameH - 1 - ly;
+                        if (!(x3 === x1 && y3 === y1)) pushWorld(x3, y3);
+                    }
+
+                    if (mirrorH && mirrorV && frameW !== null && frameH !== null) {
+                        const x4 = frameW - 1 - lx;
+                        const y4 = frameH - 1 - ly;
+                        const dup1 = (x4 === x1 && y4 === y1);
+                        const dup2 = (x2 !== null && y2 !== null && x4 === x2 && y4 === y2);
+                        const dup3 = (x3 !== null && y3 !== null && x4 === x3 && y4 === y3);
+                        if (!dup1 && !dup2 && !dup3) pushWorld(x4, y4);
                     }
                 };
                 for (let yy = 0; yy < side; yy++) {
@@ -4065,6 +4094,7 @@ export class SpriteScene extends Scene {
                         addMirrored(sx + xx, sy + yy);
                     }
                 }
+                pixels.length = write;
                 return pixels;
             };
 
@@ -4078,17 +4108,25 @@ export class SpriteScene extends Scene {
             if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                const worldPixels = worldPixelsFromBrush(sx, sy);
-                try { if (this._anyWorldPixelWouldChange(worldPixels, color)) this._playSfx('pixel.place'); } catch (e) {}
-                this._paintWorldPixels(worldPixels, color);
+                const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
+                try {
+                    if (this.mouse.pressed('left') && this._anyWorldPixelWouldChange(worldPixels, color)) {
+                        this._playSfx('pixel.place');
+                    }
+                } catch (e) {}
+                this._paintWorldPixels(worldPixels, color, { dedupe: false });
             }
             if (this.mouse.held('right')) { // erase NxN square
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                const worldPixels = worldPixelsFromBrush(sx, sy);
-                try { if (this._anyWorldPixelWouldChange(worldPixels, eraseColor)) this._playSfx('pixel.remove'); } catch (e) {}
-                this._paintWorldPixels(worldPixels, eraseColor);
+                const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
+                try {
+                    if (this.mouse.pressed('right') && this._anyWorldPixelWouldChange(worldPixels, eraseColor)) {
+                        this._playSfx('pixel.remove');
+                    }
+                } catch (e) {}
+                this._paintWorldPixels(worldPixels, eraseColor, { dedupe: false });
             }
 
             } finally {
@@ -4124,7 +4162,7 @@ export class SpriteScene extends Scene {
             if (!center) return;
 
             const side = Math.max(1, Math.min(15, this.brushSize || 1));
-            const tiles = this._tileBrushTiles(center.col, center.row, side);
+            const tiles = this._tileBrushTiles(center.col, center.row, side, this._tileBrushTilesBuffer);
             if (!tiles.length) return;
 
             // SFX: play once on press.
@@ -4140,22 +4178,25 @@ export class SpriteScene extends Scene {
 
             // Build the frame stack so tile painting mirrors the 'y' bind behavior (multi-select aware).
             const buildStack = () => {
-                const frames = [];
+                const frames = this._tileBrushStackBuffer || (this._tileBrushStackBuffer = []);
+                frames.length = 0;
                 const pushFrame = (v) => {
                     if (!Number.isFinite(v)) return;
-                    const n = Number(v);
-                    if (!frames.includes(n)) frames.push(n);
+                    const n = Number(v) | 0;
+                    for (let i = 0; i < frames.length; i++) {
+                        if (frames[i] === n) return;
+                    }
+                    frames.push(n);
                 };
                 try { pushFrame(this.selectedFrame); } catch (e) {}
                 try {
                     const fs = this.FrameSelect;
                     if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
-                        const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
-                        for (const i of arr) pushFrame(i);
+                        for (const i of fs._multiSelected.values()) pushFrame(i);
+                        frames.sort((a, b) => a - b);
                     }
                 } catch (e) { /* ignore multi-select gather errors */ }
-                const deduped = Array.from(new Set(frames)).sort((a,b)=>a-b);
-                return (deduped.length > 1) ? deduped : [];
+                return (frames.length > 1) ? frames : [];
             };
 
             const stack = buildStack();
@@ -4165,6 +4206,8 @@ export class SpriteScene extends Scene {
             const baseTransform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
 
             if (this.mouse.held('left')) {
+                const updateSet = this._autotileNeighborCoordSet || (this._autotileNeighborCoordSet = new Set());
+                if (this.autotile) updateSet.clear();
                 for (const t of tiles) {
                     const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
                     if (idx === null || idx === undefined) continue;
@@ -4189,13 +4232,22 @@ export class SpriteScene extends Scene {
                         //console.log('Placed tile connection:', connKey, 'at', t.col, t.row, entry);
                     } catch (e) {}
                     if (baseTransform) this._setAreaTransformAtIndex(idx, { ...baseTransform }, true);
-                    // update neighbors if autotile enabled
-                    try {
-                        if (this.autotile) {
-                            const logicalAnim = this._getAutotileLogicalAnimationName(entry.anim || this.selectedAnimation || '');
-                            this._updateAutotileNeighbors(t.col, t.row, logicalAnim);
-                        }
-                    } catch(e){}
+                    try { if (this.autotile) this._collectAutotileNeighborhoodKeys(t.col, t.row, updateSet); } catch (e) {}
+                }
+
+                if (this.autotile && updateSet.size > 0) {
+                    const fallbackAnim = this._getAutotileLogicalAnimationName(baseBinding && baseBinding.anim ? baseBinding.anim : this.selectedAnimation);
+                    for (const key of updateSet.values()) {
+                        const p = this._parseTileKey(key);
+                        if (!p) continue;
+                        const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(p.col, p.row) : null;
+                        if (ai === null || ai === undefined) continue;
+                        const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+                        if (!b || !b.anim) continue;
+                        const logical = this._getAutotileLogicalAnimationName(b.anim) || fallbackAnim;
+                        if (!logical) continue;
+                        this._applyAutotileAt(p.col, p.row, logical);
+                    }
                 }
             } else if (this.mouse.held('right')) {
                 // If tiles are selected, right-drag acts as deselect instead of erase
@@ -4225,10 +4277,12 @@ export class SpriteScene extends Scene {
     }
 
     // Compute tile footprint for a brush centered at (col,row) covering `side` tiles per edge.
-    _tileBrushTiles(centerCol, centerRow, side) {
-        const tiles = [];
+    _tileBrushTiles(centerCol, centerRow, side, outTiles = null) {
+        const tiles = Array.isArray(outTiles) ? outTiles : [];
+        tiles.length = 0;
         const n = Math.max(1, Math.min(1000, Number(side) || 1));
         const start = -Math.floor(n / 2);
+        let k = 0;
         for (let ddy = 0; ddy < n; ddy++) {
             const dy = start + ddy;
             for (let ddx = 0; ddx < n; ddx++) {
@@ -4236,10 +4290,33 @@ export class SpriteScene extends Scene {
                 const col = centerCol + dx;
                 const row = centerRow + dy;
                 const areaIndex = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
-                tiles.push({ col, row, areaIndex });
+                let entry = tiles[k];
+                if (!entry) {
+                    entry = { col: 0, row: 0, areaIndex: null };
+                    tiles[k] = entry;
+                }
+                entry.col = col;
+                entry.row = row;
+                entry.areaIndex = areaIndex;
+                k++;
             }
         }
+        tiles.length = k;
         return tiles;
+    }
+
+    _collectAutotileNeighborhoodKeys(col, row, outSet) {
+        const set = outSet || this._autotileNeighborCoordSet;
+        if (!set) return;
+        const deltas = this._autotileNeighborDeltas || [
+            [0, 0],
+            [0, -1], [1, 0], [0, 1], [-1, 0],
+            [-1, -1], [1, -1], [1, 1], [-1, 1]
+        ];
+        for (let i = 0; i < deltas.length; i++) {
+            const d = deltas[i];
+            set.add(this._tileKey(col + d[0], row + d[1]));
+        }
     }
 
     // Compute an 8-bit connection key for tile at (col,row) for a given animation name.
@@ -5020,14 +5097,24 @@ export class SpriteScene extends Scene {
                 return { ok: false, reason: 'No connection keys available.' };
             }
 
+            const existingByConnKey = new Map();
+            const initialLogicalCount = Math.max(0, Number(this._getAnimationLogicalFrameCount(anim)) || 0);
+            for (let i = 0; i < initialLogicalCount; i++) {
+                const raw = this._tileConnMap[anim + '::' + i];
+                if (typeof raw !== 'string') continue;
+                const norm = this._normalizeOpenConnectionKey(raw);
+                if (!existingByConnKey.has(norm)) existingByConnKey.set(norm, i);
+            }
+
             let created = 0;
             let updated = 0;
             let skipped = 0;
             const replaceExisting = !!settings.replaceExisting;
+            let nextInsertIndex = initialLogicalCount;
 
             for (const rawKey of keys) {
                 const key = this._normalizeOpenConnectionKey(rawKey);
-                const existingIndex = this._findConnectionFrameIndex(anim, key);
+                const existingIndex = existingByConnKey.has(key) ? existingByConnKey.get(key) : null;
                 if (existingIndex !== null && !replaceExisting) {
                     skipped++;
                     continue;
@@ -5041,7 +5128,8 @@ export class SpriteScene extends Scene {
 
                 let dstIndex = existingIndex;
                 if (dstIndex === null) {
-                    dstIndex = Math.max(0, Number(this._getAnimationLogicalFrameCount(anim)) || 0);
+                    dstIndex = nextInsertIndex;
+                    nextInsertIndex++;
                     sheet.insertFrame(anim);
                     created++;
                 } else {
@@ -5057,6 +5145,7 @@ export class SpriteScene extends Scene {
                 dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
                 dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
                 this._tileConnMap[anim + '::' + dstIndex] = key;
+                existingByConnKey.set(key, dstIndex);
             }
 
             try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
@@ -5394,8 +5483,13 @@ export class SpriteScene extends Scene {
 
     // Update neighboring tiles around (col,row) for autotile (4-way and diagonals)
     _updateAutotileNeighbors(col, row, anim) {
-        const deltas = [ [0,0], [0,-1],[1,0],[0,1],[-1,0],[-1,-1],[1,-1],[1,1],[-1,1] ];
-        for (const d of deltas) {
+        const deltas = this._autotileNeighborDeltas || [
+            [0, 0],
+            [0, -1], [1, 0], [0, 1], [-1, 0],
+            [-1, -1], [1, -1], [1, 1], [-1, 1]
+        ];
+        for (let i = 0; i < deltas.length; i++) {
+            const d = deltas[i];
             const c = col + d[0];
             const r = row + d[1];
             const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(c, r) : null;
@@ -6119,7 +6213,7 @@ export class SpriteScene extends Scene {
                 if (renderOnlyTile) {
                     // Tile selection in render-only tilemode
                     if (!this._tileSelection) this._tileSelection = new Set();
-                    const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1);
+                    const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1, this._tileBrushTilesBuffer);
                     if (this.mouse.held('left')) {
                         for (const t of tileBrush) this._tileSelection.add(this._tileKey(t.col, t.row));
                     } else if (this.mouse.held('right')) {
@@ -8730,49 +8824,73 @@ export class SpriteScene extends Scene {
         } catch (e) { return null; }
     }
 
-    _paintWorldPixels(worldPixels, color) {
+    _paintWorldPixels(worldPixels, color, options = null) {
         try {
             const sheet = this.currentSprite;
             if (!sheet || !worldPixels || worldPixels.length === 0) return;
             const slice = (sheet.slicePx) ? sheet.slicePx : 1;
-            const seen = new Set();
+            const dedupe = !(options && options.dedupe === false);
+            const seen = dedupe ? (this._worldPixelDedupSet || (this._worldPixelDedupSet = new Set())) : null;
+            if (seen) seen.clear();
+            const bindingCache = this._paintBindingCache || (this._paintBindingCache = new Map());
+            bindingCache.clear();
+            const mod = (v, m) => {
+                const r = v % m;
+                return r < 0 ? r + m : r;
+            };
             for (const wp of worldPixels) {
                 if (!wp) continue;
-                const key = `${wp.x|0},${wp.y|0}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
+                const wx = Number(wp.x) | 0;
+                const wy = Number(wp.y) | 0;
+                if (seen) {
+                    const key = `${wx},${wy}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                }
 
                 // In non-tile mode, drop pixels that fall outside the single frame instead of clamping.
                 if (!this.tilemode) {
-                    if (wp.x < 0 || wp.y < 0 || wp.x >= slice || wp.y >= slice) continue;
+                    if (wx < 0 || wy < 0 || wx >= slice || wy >= slice) continue;
                 }
 
-                const target = this._worldPixelToTile(wp.x, wp.y, slice);
-                if (!target) continue;
-                if (this.tilemode && !this._isTileActive(target.col, target.row)) continue;
-                const areaIndex = this.tilemode ? target.areaIndex : null;
+                let localX = wx;
+                let localY = wy;
+                let areaIndex = null;
+                if (this.tilemode) {
+                    const col = Math.floor(wx / slice);
+                    const row = Math.floor(wy / slice);
+                    if (!this._isTileActive(col, row)) continue;
+                    localX = mod(wx, slice);
+                    localY = mod(wy, slice);
+                    areaIndex = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
+                }
+
                 let anim = this.selectedAnimation;
                 let frameIdx = this.selectedFrame;
                 if (typeof areaIndex === 'number') {
-                    const binding = this.getAreaBinding(areaIndex);
+                    let binding = bindingCache.get(areaIndex);
+                    if (binding === undefined) {
+                        binding = this.getAreaBinding(areaIndex) || null;
+                        bindingCache.set(areaIndex, binding);
+                    }
                     if (binding && binding.anim !== undefined && binding.index !== undefined) {
                         anim = binding.anim;
                         frameIdx = Number(binding.index);
                     }
                 }
 
-                if (this.maskShapesWithSelection && this.isPixelMasked(target.localX, target.localY, areaIndex)) continue;
+                if (this.maskShapesWithSelection && this.isPixelMasked(localX, localY, areaIndex)) continue;
 
                 // If pixel-perfect mode is active, route single-pixel writes through
                 // the pixel-perfect handler so strokes can restore L-bend pixels.
                 if (this.pixelPerfect) {
                     try {
-                        this._applyPixelPerfectPixel(sheet, anim, frameIdx, target.localX, target.localY, color, areaIndex);
+                        this._applyPixelPerfectPixel(sheet, anim, frameIdx, localX, localY, color, areaIndex);
                     } catch (e) { /* ignore pixel-perfect write errors */ }
                 } else if (typeof sheet.setPixel === 'function') {
-                    try { sheet.setPixel(anim, frameIdx, target.localX, target.localY, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
+                    try { sheet.setPixel(anim, frameIdx, localX, localY, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
                 } else if (typeof sheet.modifyFrame === 'function') {
-                    try { sheet.modifyFrame(anim, frameIdx, { x: target.localX, y: target.localY, color, blendType: 'replace' }); } catch (e) { /* ignore per-pixel errors */ }
+                    try { sheet.modifyFrame(anim, frameIdx, { x: localX, y: localY, color, blendType: 'replace' }); } catch (e) { /* ignore per-pixel errors */ }
                 }
             }
 
@@ -13451,8 +13569,8 @@ export class SpriteScene extends Scene {
             const sheet = this.currentSprite;
             if (!ctx || !sheet || !visible || !size || !basePos) return [];
 
-            const activeSet = this._tileActive || new Set();
-            const activeCount = activeSet.size || 0;
+            const activeSet = this._tileActive;
+            const activeCount = activeSet ? (activeSet.size || 0) : 0;
             const minCol = visible.minCol | 0;
             const maxCol = visible.maxCol | 0;
             const minRow = visible.minRow | 0;
@@ -13462,7 +13580,8 @@ export class SpriteScene extends Scene {
             const visibleCount = visibleCols * visibleRows;
             const iterateVisibleWindow = visibleCount > 0 && (activeCount === 0 || activeCount > (visibleCount * 2));
 
-            const frameCache = new Map();
+            const frameCache = this._renderOnlyFrameCache || (this._renderOnlyFrameCache = new Map());
+            frameCache.clear();
             const frameFor = (anim, frameIdx) => {
                 const k = `${anim || ''}::${Number(frameIdx) || 0}`;
                 if (frameCache.has(k)) return frameCache.get(k);
@@ -13478,7 +13597,8 @@ export class SpriteScene extends Scene {
             const by = basePos.y;
             const scaleX = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.x)) ? this.Draw.Scale.x : 1;
             const scaleY = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.y)) ? this.Draw.Scale.y : 1;
-            const entryCache = new Map();
+            const entryCache = this._renderOnlyEntryCache || (this._renderOnlyEntryCache = new Map());
+            entryCache.clear();
             const entriesForIdx = (idx) => {
                 const key = idx | 0;
                 if (entryCache.has(key)) return entryCache.get(key);
@@ -13515,14 +13635,20 @@ export class SpriteScene extends Scene {
                     if (!entry || !entry.binding) continue;
                     const b = entry.binding;
                     const anim = b.anim;
-                    const multi = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                    const frameList = (multi && multi.length > 0) ? multi : [Number(b.index) || 0];
+                    const multi = Array.isArray(b.multiFrames) ? b.multiFrames : null;
                     ctx.save();
                     ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
-                    for (const fi of frameList) {
-                        const fr = frameFor(anim, fi);
-                        if (!fr) continue;
-                        ctx.drawImage(fr, dx, dy, dw, dh);
+                    if (multi && multi.length > 0) {
+                        for (let mi = 0; mi < multi.length; mi++) {
+                            const fi = Number(multi[mi]);
+                            if (!Number.isFinite(fi)) continue;
+                            const fr = frameFor(anim, fi);
+                            if (!fr) continue;
+                            ctx.drawImage(fr, dx, dy, dw, dh);
+                        }
+                    } else {
+                        const fr = frameFor(anim, Number(b.index) || 0);
+                        if (fr) ctx.drawImage(fr, dx, dy, dw, dh);
                     }
                     ctx.restore();
                     if ((Number(entry.darken) || 0) > 0) {
@@ -13535,11 +13661,14 @@ export class SpriteScene extends Scene {
                 }
             };
 
+            const hoverCol = hoverCoord ? (hoverCoord.col | 0) : null;
+            const hoverRow = hoverCoord ? (hoverCoord.row | 0) : null;
+
             if (iterateVisibleWindow) {
                 for (let row = minRow; row <= maxRow; row++) {
                     for (let col = minCol; col <= maxCol; col++) {
-                        const isActive = activeSet.has(`${col},${row}`);
-                        if (!isActive && !(hoverCoord && col === hoverCoord.col && row === hoverCoord.row)) continue;
+                        const isActive = !!(activeSet && activeSet.has(`${col},${row}`));
+                        if (!isActive && !(hoverCoord && col === hoverCol && row === hoverRow)) continue;
                         drawTileAt(col, row, isActive);
                     }
                 }
@@ -13553,9 +13682,9 @@ export class SpriteScene extends Scene {
                     drawTileAt(col, row, true);
                 }
                 if (hoverCoord) {
-                    const hk = `${hoverCoord.col|0},${hoverCoord.row|0}`;
-                    if (!activeSet.has(hk) && hoverCoord.col >= minCol && hoverCoord.col <= maxCol && hoverCoord.row >= minRow && hoverCoord.row <= maxRow) {
-                        drawTileAt(hoverCoord.col|0, hoverCoord.row|0, false);
+                    const hk = `${hoverCol},${hoverRow}`;
+                    if (!(activeSet && activeSet.has(hk)) && hoverCol >= minCol && hoverCol <= maxCol && hoverRow >= minRow && hoverRow <= maxRow) {
+                        drawTileAt(hoverCol, hoverRow, false);
                     }
                 }
             }
@@ -13563,15 +13692,36 @@ export class SpriteScene extends Scene {
             try { ctx.imageSmoothingEnabled = prevSmooth; } catch (e) {}
 
             // Keep minimal draw-area metadata for hit resolution and UI overlays.
-            const areas = [];
-            if (hoverCoord && Number.isFinite(hoverCoord.col) && Number.isFinite(hoverCoord.row)) {
-                const hx = bx + hoverCoord.col * sx;
-                const hy = by + hoverCoord.row * sy;
-                const info = { topLeft: new Vector(hx, hy), size, padding: 0, dstW: sx, dstH: sy, dstPos: new Vector(hx, hy) };
+            const areas = this._renderOnlyAreas || (this._renderOnlyAreas = []);
+            areas.length = 0;
+            if (hoverCoord && Number.isFinite(hoverCol) && Number.isFinite(hoverRow)) {
+                const hx = bx + hoverCol * sx;
+                const hy = by + hoverRow * sy;
+                const info = this._renderOnlyHoverArea || (this._renderOnlyHoverArea = {
+                    topLeft: new Vector(0, 0),
+                    size: null,
+                    padding: 0,
+                    dstW: 0,
+                    dstH: 0,
+                    dstPos: new Vector(0, 0),
+                    renderOnly: true,
+                    areaIndex: 0,
+                    tileCol: 0,
+                    tileRow: 0,
+                    active: false
+                });
+                info.topLeft.x = hx;
+                info.topLeft.y = hy;
+                info.size = size;
+                info.padding = 0;
+                info.dstW = sx;
+                info.dstH = sy;
+                info.dstPos.x = hx;
+                info.dstPos.y = hy;
                 info.renderOnly = true;
-                info.areaIndex = this._getAreaIndexForCoord(hoverCoord.col|0, hoverCoord.row|0);
-                info.tileCol = hoverCoord.col|0;
-                info.tileRow = hoverCoord.row|0;
+                info.areaIndex = this._getAreaIndexForCoord(hoverCol, hoverRow);
+                info.tileCol = hoverCol;
+                info.tileRow = hoverRow;
                 info.active = !!this._isTileActive(info.tileCol, info.tileRow);
                 areas.push(info);
             }
@@ -14648,8 +14798,13 @@ export class SpriteScene extends Scene {
                 if ((Number(entry.darken) || 0) > 0) {
                     drawCtx.save();
                     drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
+                    // Hot path: avoid Draw.rect allocations, but still honor Draw-scale mapping.
                     drawCtx.fillStyle = '#000000';
-                    drawCtx.fillRect(dstPos.x, dstPos.y, dstW, dstH);
+                    const sx = (this.Draw && typeof this.Draw.px === 'function') ? this.Draw.px(dstPos.x) : dstPos.x;
+                    const sy = (this.Draw && typeof this.Draw.py === 'function') ? this.Draw.py(dstPos.y) : dstPos.y;
+                    const sw = (this.Draw && typeof this.Draw.px === 'function') ? this.Draw.px(dstW) : dstW;
+                    const sh = (this.Draw && typeof this.Draw.py === 'function') ? this.Draw.py(dstH) : dstH;
+                    drawCtx.fillRect(sx, sy, sw, sh);
                     drawCtx.restore();
                 }
             }
@@ -14867,14 +15022,18 @@ export class SpriteScene extends Scene {
         this.Draw.translate(this.offset)
         
         // display the editable frame centered on the screen
-        const size = new Vector(384, 384);
-        const center = new Vector((1920 - size.x) / 2, (1080 - size.y) / 2);
+        const size = this._mainDrawSize || (this._mainDrawSize = new Vector(384, 384));
+        const center = this._mainDrawCenter || (this._mainDrawCenter = new Vector(0, 0));
+        center.x = (1920 - size.x) / 2;
+        center.y = (1080 - size.y) / 2;
 
         // Build all displayed tile positions.
         // When tilemode is off, show a single central area.
         // When tilemode is on, draw all active tiles (infinite grid), plus the hovered tile even if inactive.
         let areas = [];
-        const basePos = center.clone(); // tile (0,0) top-left
+        const basePos = this._mainDrawBasePos || (this._mainDrawBasePos = new Vector(0, 0)); // tile (0,0) top-left
+        basePos.x = center.x;
+        basePos.y = center.y;
         let usedFastRenderOnly = false;
         let hover = null;
         let visible = null;
@@ -15699,7 +15858,7 @@ export class SpriteScene extends Scene {
             const basePos = baseArea.topLeft;
             const tileSize = baseArea.size;
             // anchor tile (last hovered or explicit)
-            const anchor = this._tileHoverAnchor ? { ...this._tileHoverAnchor } : null;
+            const anchor = this._tileHoverAnchor || null;
 
             // Draw selection outlines for selected tiles — only when relevant renderOnly areas exist
             try {
@@ -15711,7 +15870,9 @@ export class SpriteScene extends Scene {
                             if (!c) continue;
                             // try to find in current draw areas first
                             const idx = this._getAreaIndexForCoord(c.col, c.row);
-                            let areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
+                            let areaInfo = (this._drawAreaIndexMap && typeof this._drawAreaIndexMap.get === 'function' && typeof idx === 'number')
+                                ? (this._drawAreaIndexMap.get(idx) || null)
+                                : null;
                             // fallback: compute area info from tile coords
                             if (!areaInfo) {
                                 try {
@@ -15727,7 +15888,9 @@ export class SpriteScene extends Scene {
                 // also allow selection drawing when anchor is over a renderOnly tile
                 if (!showTileSelection && anchor && !allRenderOnly) {
                     const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
-                    let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    let ainfo = (this._drawAreaIndexMap && typeof this._drawAreaIndexMap.get === 'function' && typeof aidx === 'number')
+                        ? (this._drawAreaIndexMap.get(aidx) || null)
+                        : null;
                     if (!ainfo) {
                         try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
                     }
@@ -15774,7 +15937,9 @@ export class SpriteScene extends Scene {
                 try {
                     if (!allRenderOnly) {
                         const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
-                        let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                        let ainfo = (this._drawAreaIndexMap && typeof this._drawAreaIndexMap.get === 'function' && typeof aidx === 'number')
+                            ? (this._drawAreaIndexMap.get(aidx) || null)
+                            : null;
                         if (!ainfo) {
                             try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
                         }

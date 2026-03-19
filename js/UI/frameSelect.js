@@ -2978,20 +2978,34 @@ export default class FrameSelect {
         let slotCount = 1; // keep at least the trailing "add" slot
         try {
             const groupsForScroll = this._getFrameGroups(animForScroll);
-            for (const g of groupsForScroll){ g.firstIndex = Math.min.apply(null, g.indices); }
-            slotCount = 0;
-            for (let i = 0; i < framesForScroll.length; i++){
-                const groupAtFirst = groupsForScroll.find(g => g.firstIndex === i);
-                if (groupAtFirst){
-                    slotCount++; // group slot row
-                    if (groupAtFirst.collapsed){
-                        i = Math.max.apply(null, groupAtFirst.indices);
-                        continue;
-                    }
+            if (!groupsForScroll || groupsForScroll.length === 0) {
+                slotCount = Math.max(1, (framesForScroll.length || 0) + 1);
+            } else {
+                const firstIndexMap = new Map();
+                const lastIndexMap = new Map();
+                for (let gi = 0; gi < groupsForScroll.length; gi++) {
+                    const g = groupsForScroll[gi];
+                    if (!g || !Array.isArray(g.indices) || g.indices.length === 0) continue;
+                    const first = Math.min.apply(null, g.indices);
+                    const last = Math.max.apply(null, g.indices);
+                    g.firstIndex = first;
+                    firstIndexMap.set(first, g);
+                    lastIndexMap.set(first, last);
                 }
-                slotCount++; // frame slot row
+                slotCount = 0;
+                for (let i = 0; i < framesForScroll.length; i++){
+                    const groupAtFirst = firstIndexMap.get(i);
+                    if (groupAtFirst){
+                        slotCount++; // group slot row
+                        if (groupAtFirst.collapsed){
+                            i = lastIndexMap.get(i);
+                            continue;
+                        }
+                    }
+                    slotCount++; // frame slot row
+                }
+                slotCount++; // add slot row
             }
-            slotCount++; // add slot row
         } catch (e) {
             slotCount = Math.max(1, (framesForScroll.length || 0) + 1);
         }
@@ -3015,22 +3029,35 @@ export default class FrameSelect {
             const dt = (typeof delta === 'number' && delta > 0) ? delta : (1 / 60);
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
-            // Build a logical frames sequence that collapses layered groups into single frames
             const groups = this._getFrameGroups(anim);
-            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
-            const framesSeq = [];
-            for (let i = 0; i < framesArr.length; i++){
-                const grp = groups.find(g => g.firstIndex === i);
-                if (grp){
-                    if (grp.layered) {
+            let hasLayeredGroups = false;
+            const layeredFirstMap = new Map();
+            const layeredLastMap = new Map();
+            for (let gi = 0; gi < groups.length; gi++) {
+                const g = groups[gi];
+                if (!g || !g.layered || !Array.isArray(g.indices) || g.indices.length === 0) continue;
+                const first = Math.min.apply(null, g.indices);
+                const last = Math.max.apply(null, g.indices);
+                g.firstIndex = first;
+                layeredFirstMap.set(first, g);
+                layeredLastMap.set(first, last);
+                hasLayeredGroups = true;
+            }
+
+            let framesSeq = null;
+            let seqLength = framesArr.length;
+            if (hasLayeredGroups) {
+                framesSeq = [];
+                for (let i = 0; i < framesArr.length; i++){
+                    const grp = layeredFirstMap.get(i);
+                    if (grp) {
                         framesSeq.push({ type: 'group', group: grp });
-                        // skip all indices in group
-                        i = Math.max.apply(null, grp.indices);
+                        i = layeredLastMap.get(i);
                         continue;
                     }
-                    // if not layered, we still want individual frames to appear
+                    framesSeq.push({ type: 'frame', index: i });
                 }
-                framesSeq.push({ type: 'frame', index: i });
+                seqLength = framesSeq.length;
             }
             // reset when animation changes
             if (anim !== this._animName) {
@@ -3052,21 +3079,25 @@ export default class FrameSelect {
                     const selFrame = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
                     if (selFrame !== null && selFrame !== undefined) {
                         let found = -1;
-                        for (let si = 0; si < framesSeq.length; si++){
-                            const e = framesSeq[si];
-                            if (e.type === 'frame' && e.index === selFrame) { found = si; break; }
-                            if (e.type === 'group' && Array.isArray(e.group.indices) && e.group.indices.indexOf(selFrame) !== -1) { found = si; break; }
+                        if (!hasLayeredGroups) {
+                            found = Math.max(0, Math.min(framesArr.length - 1, selFrame | 0));
+                        } else {
+                            for (let si = 0; si < framesSeq.length; si++){
+                                const e = framesSeq[si];
+                                if (e.type === 'frame' && e.index === selFrame) { found = si; break; }
+                                if (e.type === 'group' && Array.isArray(e.group.indices) && e.group.indices.indexOf(selFrame) !== -1) { found = si; break; }
+                            }
                         }
                         if (found !== -1) this._animIndex = found;
                     }
                 }
             } catch (e) {}
-            if (framesSeq.length > 0 && this._animFps > 0) {
+            if (seqLength > 0 && this._animFps > 0) {
                 this._animTimer += dt;
                 const frameTime = 1 / (this._animFps || 8);
                 while (this._animTimer >= frameTime) {
                     this._animTimer -= frameTime;
-                    this._animIndex = (this._animIndex + 1) % framesSeq.length;
+                    this._animIndex = (this._animIndex + 1) % seqLength;
                 }
             } else {
                 this._animIndex = 0;
@@ -3919,23 +3950,40 @@ export default class FrameSelect {
                         // fallthrough to sequence draw below
                     }
                 } else {
-                    // build frames sequence like update() to honor layered groups
+                    // Build logical sequence only when layered groups are active.
                     const groups = this._getFrameGroups(anim);
-                    for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
-                    const framesSeq = [];
-                    for (let i = 0; i < framesArr.length; i++){
-                        const grp = groups.find(g => g.firstIndex === i);
-                        if (grp){
-                            if (grp.layered) {
+                    let hasLayeredGroups = false;
+                    const layeredFirstMap = new Map();
+                    const layeredLastMap = new Map();
+                    for (let gi = 0; gi < groups.length; gi++) {
+                        const g = groups[gi];
+                        if (!g || !g.layered || !Array.isArray(g.indices) || g.indices.length === 0) continue;
+                        const first = Math.min.apply(null, g.indices);
+                        const last = Math.max.apply(null, g.indices);
+                        g.firstIndex = first;
+                        layeredFirstMap.set(first, g);
+                        layeredLastMap.set(first, last);
+                        hasLayeredGroups = true;
+                    }
+
+                    let framesSeq = null;
+                    const seqLen = hasLayeredGroups ? 0 : framesArr.length;
+                    let logicalSeqLen = seqLen;
+                    if (hasLayeredGroups) {
+                        framesSeq = [];
+                        for (let i = 0; i < framesArr.length; i++){
+                            const grp = layeredFirstMap.get(i);
+                            if (grp) {
                                 framesSeq.push({ type: 'group', group: grp });
-                                i = Math.max.apply(null, grp.indices);
+                                i = layeredLastMap.get(i);
                                 continue;
                             }
+                            framesSeq.push({ type: 'frame', index: i });
                         }
-                        framesSeq.push({ type: 'frame', index: i });
+                        logicalSeqLen = framesSeq.length;
                     }
-                    const seqLen = framesSeq.length;
-                    if (seqLen === 0) {
+
+                    if (logicalSeqLen === 0) {
                         this.UIDraw.rect(contentPos, contentSize, '#00000000', false, true, 2, '#444444AA');
                     } else {
                         // When preview is paused (0 fps) and nothing is multi-selected,
@@ -3943,41 +3991,85 @@ export default class FrameSelect {
                         if (this._animFps === 0 && (!this._multiSelected || this._multiSelected.size === 0) && typeof this.scene !== 'undefined' && typeof this.scene.selectedFrame === 'number') {
                             try {
                                 const sel = this.scene.selectedFrame;
-                                // If selected frame belongs to a layered group, draw the composited group instead
-                                const groupForSel = groups.find(g => Array.isArray(g.indices) && g.indices.indexOf(sel) !== -1 && g.layered);
-                                if (groupForSel) {
-                                    try {
-                                        const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
-                                        const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
-                                        const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
-                                        for (const idx of (groupForSel.indices || [])) {
-                                            try {
-                                                const src = this._getPreviewFrameCanvas(anim, idx);
-                                                if (src) tctx.drawImage(src, 0, 0);
-                                            } catch (e) {}
+                                if (!hasLayeredGroups) {
+                                    const drawIndex = Math.max(0, Math.min(framesArr.length - 1, sel | 0));
+                                    const fr = this._getPreviewFrameCanvas(anim, drawIndex);
+                                    if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
+                                    else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, drawIndex);
+                                } else {
+                                    // If selected frame belongs to a layered group, draw the composited group instead
+                                    const groupForSel = groups.find(g => Array.isArray(g.indices) && g.indices.indexOf(sel) !== -1 && g.layered);
+                                    if (groupForSel) {
+                                        try {
+                                            const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                            const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                            const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                            for (const idx of (groupForSel.indices || [])) {
+                                                try {
+                                                    const src = this._getPreviewFrameCanvas(anim, idx);
+                                                    if (src) tctx.drawImage(src, 0, 0);
+                                                } catch (e) {}
+                                            }
+                                            this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                                        } catch (e) {
+                                            // fallback to drawing the selected frame
+                                            const fr = this._getPreviewFrameCanvas(anim, sel);
+                                            if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
+                                            else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, sel);
                                         }
-                                        this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
-                                    } catch (e) {
-                                        // fallback to drawing the selected frame
+                                    } else {
+                                        // simple case: draw the selected frame directly
                                         const fr = this._getPreviewFrameCanvas(anim, sel);
                                         if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
                                         else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, sel);
                                     }
-                                } else {
-                                    // simple case: draw the selected frame directly
-                                    const fr = this._getPreviewFrameCanvas(anim, sel);
-                                    if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
-                                    else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, sel);
                                 }
                             } catch (e) {
                                 // if anything goes wrong, fall back to the normal sequence logic below
-                                const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
+                                const seqIndex = Math.max(0, Math.min(this._animIndex, logicalSeqLen - 1));
+                                if (!hasLayeredGroups) {
+                                    const fr = this._getPreviewFrameCanvas(anim, seqIndex);
+                                    if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
+                                    else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, seqIndex);
+                                } else {
+                                    const entry = framesSeq[seqIndex];
+                                    if (entry.type === 'frame') {
+                                        const fr = this._getPreviewFrameCanvas(anim, entry.index);
+                                        if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
+                                        else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
+                                    } else if (entry.type === 'group') {
+                                        try {
+                                            const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                            const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                            const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                            for (const idx of entry.group.indices) {
+                                                try {
+                                                    const src = this._getPreviewFrameCanvas(anim, idx);
+                                                    if (src) tctx.drawImage(src, 0, 0);
+                                                } catch (e) {}
+                                            }
+                                            this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                                        } catch (e) {
+                                            const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
+                                            this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            const seqIndex = Math.max(0, Math.min(this._animIndex, logicalSeqLen - 1));
+                            if (!hasLayeredGroups) {
+                                const fr = this._getPreviewFrameCanvas(anim, seqIndex);
+                                if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
+                                else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, seqIndex);
+                            } else {
                                 const entry = framesSeq[seqIndex];
                                 if (entry.type === 'frame') {
                                     const fr = this._getPreviewFrameCanvas(anim, entry.index);
                                     if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
                                     else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
                                 } else if (entry.type === 'group') {
+                                    // draw composited layered preview
                                     try {
                                         const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
                                         const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
@@ -3990,35 +4082,10 @@ export default class FrameSelect {
                                         }
                                         this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
                                     } catch (e) {
+                                        // fallback to first frame
                                         const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
                                         this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
                                     }
-                                }
-                            }
-                        } else {
-                            const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
-                            const entry = framesSeq[seqIndex];
-                            if (entry.type === 'frame') {
-                                const fr = this._getPreviewFrameCanvas(anim, entry.index);
-                                if (fr) this.UIDraw.image(fr, contentPos, contentSize, null, 0, 1, false);
-                                else this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
-                            } else if (entry.type === 'group') {
-                                // draw composited layered preview
-                                try {
-                                    const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
-                                    const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
-                                    const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
-                                    for (const idx of entry.group.indices) {
-                                        try {
-                                            const src = this._getPreviewFrameCanvas(anim, idx);
-                                            if (src) tctx.drawImage(src, 0, 0);
-                                        } catch (e) {}
-                                    }
-                                    this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
-                                } catch (e) {
-                                    // fallback to first frame
-                                    const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
-                                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
                                 }
                             }
                         }
@@ -4142,14 +4209,24 @@ export default class FrameSelect {
         // build slots including groups
         try {
             const groups = this._getFrameGroups(anim);
-            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+            const groupFirstMap = new Map();
+            const groupLastMap = new Map();
+            for (let gi = 0; gi < groups.length; gi++){
+                const g = groups[gi];
+                if (!g || !Array.isArray(g.indices) || g.indices.length === 0) continue;
+                const first = Math.min.apply(null, g.indices);
+                const last = Math.max.apply(null, g.indices);
+                g.firstIndex = first;
+                groupFirstMap.set(first, g);
+                groupLastMap.set(first, last);
+            }
             const slots = [];
             for (let i = 0; i < framesArr.length; i++){
-                const groupAtFirst = groups.find(g => g.firstIndex === i);
+                const groupAtFirst = groupFirstMap.get(i);
                 if (groupAtFirst){
                     slots.push({ type: 'group', group: groupAtFirst });
                     if (groupAtFirst.collapsed){
-                        i = Math.max.apply(null, groupAtFirst.indices);
+                        i = groupLastMap.get(i);
                         continue;
                     }
                 }
@@ -4158,7 +4235,16 @@ export default class FrameSelect {
             // add slot for new frame
             slots.push({ type: 'add' });
 
-            for (let s = 0; s < slots.length; s++){
+            // Only draw visible rows to keep large frame counts from flooding draw calls.
+            const slotStartY = 100;
+            const slotStepY = 200;
+            const slotHeight = 190;
+            const viewportTop = (this.menu && this.menu.pos) ? this.menu.pos.y : 0;
+            const viewportBottom = viewportTop + ((this.menu && this.menu.size) ? this.menu.size.y : 1080);
+            const firstVisible = Math.max(0, Math.floor((viewportTop - this.scrollPos - slotHeight - slotStartY) / slotStepY));
+            const lastVisible = Math.min(slots.length - 1, Math.ceil((viewportBottom - this.scrollPos - slotStartY) / slotStepY));
+
+            for (let s = firstVisible; s <= lastVisible; s++){
                 const item = slots[s];
                 const slotPos = new Vector(5,100 + (180+20) * s + this.scrollPos);
                 const slotSize = new Vector(190,190);
