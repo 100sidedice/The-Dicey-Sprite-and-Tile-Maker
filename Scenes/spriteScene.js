@@ -13784,7 +13784,8 @@ export class SpriteScene extends Scene {
         try {
             if (!this._tileActive) this._tileActive = new Set();
             this._tileActive.add(this._tileKey(col, row));
-            this._getAreaIndexForCoord(col, row);
+            const idx = this._getAreaIndexForCoord(col, row);
+            try { this._invalidateTileCachesForArea(idx); } catch (e) {}
             this._tileActiveVersion = (Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0) + 1;
             if (syncOp) this._queueTileOp('activate', { col: col|0, row: row|0 });
         } catch (e) { /* ignore */ }
@@ -13878,6 +13879,7 @@ export class SpriteScene extends Scene {
             if (!Array.isArray(layer.bindings)) layer.bindings = [];
             layer.bindings[idx] = bindingEntry;
             if ((this._activeTileLayerIndex | 0) === li) this._areaBindings = layer.bindings;
+            try { this._invalidateTileCachesForArea(idx); } catch (e) {}
             return true;
         } catch (e) {
             return false;
@@ -13895,6 +13897,7 @@ export class SpriteScene extends Scene {
             if (!Array.isArray(layer.transforms)) layer.transforms = [];
             layer.transforms[idx] = transformEntry;
             if ((this._activeTileLayerIndex | 0) === li) this._areaTransforms = layer.transforms;
+            try { this._invalidateTileCachesForArea(idx); } catch (e) {}
             return true;
         } catch (e) {
             return false;
@@ -14380,7 +14383,9 @@ export class SpriteScene extends Scene {
             const iterateVisibleWindow = visibleCount > 0 && (activeCount === 0 || activeCount > (visibleCount * 2));
 
             const frameCache = this._renderOnlyFrameCache || (this._renderOnlyFrameCache = new Map());
-            frameCache.clear();
+            // Keep composited frame cache across frames to avoid rebuilding images every render.
+            // Prune conservatively if the cache grows too large to avoid unbounded memory use.
+            if (frameCache.size > 1024) frameCache.clear();
             const frameFor = (anim, frameIdx) => {
                 const k = `${anim || ''}::${Number(frameIdx) || 0}`;
                 if (frameCache.has(k)) return frameCache.get(k);
@@ -14397,7 +14402,8 @@ export class SpriteScene extends Scene {
             const scaleX = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.x)) ? this.Draw.Scale.x : 1;
             const scaleY = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.y)) ? this.Draw.Scale.y : 1;
             const entryCache = this._renderOnlyEntryCache || (this._renderOnlyEntryCache = new Map());
-            entryCache.clear();
+            // Cache tile-layer entry lists per area index. Prune occasionally when large.
+            if (entryCache.size > 4096) entryCache.clear();
             const entriesForIdx = (idx) => {
                 const key = idx | 0;
                 if (entryCache.has(key)) return entryCache.get(key);
@@ -15544,6 +15550,48 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _invalidateTileCachesForArea(areaIndex) {
+        try {
+            const idx = Number.isFinite(Number(areaIndex)) ? (areaIndex | 0) : null;
+            if (idx === null) return;
+            // Remove cached entry list for this area
+            try {
+                const entryCache = this._renderOnlyEntryCache;
+                if (entryCache && typeof entryCache.delete === 'function') entryCache.delete(idx);
+            } catch (e) {}
+
+            // Remove composited frame cache entries that reference any anim/frame bound to this area
+            try {
+                const frameCache = this._renderOnlyFrameCache;
+                if (!frameCache || typeof frameCache.delete !== 'function') return;
+                const keysToRemove = new Set();
+                if (Array.isArray(this._tileLayers)) {
+                    for (let li = 0; li < this._tileLayers.length; li++) {
+                        const l = this._tileLayers[li];
+                        if (!l) continue;
+                        const b = Array.isArray(l.bindings) ? l.bindings[idx] : null;
+                        if (!b || b.anim === undefined || b.index === undefined) continue;
+                        const anim = String(b.anim || '');
+                        if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) {
+                            for (const fi of b.multiFrames) {
+                                if (!Number.isFinite(Number(fi))) continue;
+                                keysToRemove.add(anim + '::' + (Number(fi) | 0));
+                            }
+                        } else {
+                            keysToRemove.add(anim + '::' + (Number(b.index) | 0));
+                        }
+                    }
+                }
+                if (keysToRemove.size > 0) {
+                    for (const k of keysToRemove) frameCache.delete(k);
+                } else {
+                    // If we couldn't find specific keys, do a conservative prune when cache grows
+                    if (frameCache.size > 256) frameCache.clear();
+                }
+            } catch (e) {}
+        } catch (e) {}
+    }
+
     _drawTileLayerStackToArea(dstPos, dstW, dstH, areaIndex, frameResolver, renderOnly = false) {
         try {
             const entries = this._getTileLayerDrawEntries(areaIndex);
@@ -15659,6 +15707,8 @@ export class SpriteScene extends Scene {
             areaIndex = areaIndex | 0;
             if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
             this._areaBindings[areaIndex] = bindingEntry;
+            // Invalidate any cached draw entries / composited frames for this area so render updates use new tiles
+            try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
             if (!syncOp) return true;
             const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
             if (!coord) return true;
@@ -15687,6 +15737,8 @@ export class SpriteScene extends Scene {
             areaIndex = areaIndex | 0;
             if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
             this._areaTransforms[areaIndex] = transformEntry;
+            // Invalidate caches so transforms take effect in subsequent renders
+            try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
             if (!syncOp) return true;
             const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
             if (!coord) return true;

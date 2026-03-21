@@ -1,29 +1,104 @@
 export default class Saver {
     constructor(storageKey = "gameData") {
         this.storageKey = storageKey;
+        // In-memory cache for synchronous access
         this.savedata = {};
-        this.load();
-    }
-
-    // Load saved data from localStorage
-    load() {
-        const data = localStorage.getItem(this.storageKey);
-        if (data) {
-            try {
-                this.savedata = JSON.parse(data);
-            } catch (e) {
-                console.error("Failed to parse saved data:", e);
-                this.savedata = {};
-            }
-        } else {
-        this.savedata = {};
+        // IndexedDB handles larger storage; init async but keep localStorage fallback
+        this._db = null;
+        this._dbName = 'dicey-saver-' + String(this.storageKey);
+        this._dbReady = false;
+        this._openIndexedDB();
+        // Load synchronously from localStorage first for compatibility
+        try {
+            const data = localStorage.getItem(this.storageKey);
+            if (data) this.savedata = JSON.parse(data);
+        } catch (e) {
+            this.savedata = {};
         }
+        // Migrate/refresh from IndexedDB in background
+        this._refreshFromIndexedDB();
     }
 
-    // Save current savedata to localStorage
+    async _openIndexedDB() {
+        if (this._db) return this._db;
+        return new Promise((res) => {
+            try {
+                const req = indexedDB.open(this._dbName, 1);
+                req.onupgradeneeded = (ev) => {
+                    const db = ev.target.result;
+                    if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+                };
+                req.onsuccess = (ev) => {
+                    this._db = ev.target.result;
+                    this._dbReady = true;
+                    res(this._db);
+                };
+                req.onerror = () => { this._dbReady = false; res(null); };
+            } catch (e) { this._dbReady = false; res(null); }
+        });
+    }
+
+    async _putKV(key, value) {
+        try {
+            await this._openIndexedDB();
+            if (!this._db) return false;
+            return new Promise((res) => {
+                const tx = this._db.transaction(['kv'], 'readwrite');
+                const store = tx.objectStore('kv');
+                const r = store.put(value, key);
+                r.onsuccess = () => res(true);
+                r.onerror = () => res(false);
+            });
+        } catch (e) { return false; }
+    }
+
+    async _getKV(key) {
+        try {
+            await this._openIndexedDB();
+            if (!this._db) return undefined;
+            return new Promise((res) => {
+                const tx = this._db.transaction(['kv'], 'readonly');
+                const store = tx.objectStore('kv');
+                const r = store.get(key);
+                r.onsuccess = () => res(r.result === undefined ? undefined : r.result);
+                r.onerror = () => res(undefined);
+            });
+        } catch (e) { return undefined; }
+    }
+
+    // Load saved data: synchronous localStorage-backed read already done in constructor.
+    // This method triggers an async refresh from IndexedDB if available.
+    load() {
+        // Keep for compatibility: callers may call saver.load(); ensure we refresh.
+        this._refreshFromIndexedDB();
+    }
+
+    async _refreshFromIndexedDB() {
+        try {
+            const v = await this._getKV('savedata');
+            if (v && typeof v === 'object') {
+                this.savedata = v;
+                try { localStorage.setItem(this.storageKey, JSON.stringify(this.savedata)); } catch (e) {}
+            } else {
+                // If no entry in IndexedDB but localStorage had content, migrate it
+                try {
+                    const ls = localStorage.getItem(this.storageKey);
+                    if (ls) {
+                        const parsed = JSON.parse(ls);
+                        await this._putKV('savedata', parsed);
+                        this.savedata = parsed;
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    // Save current savedata to both localStorage (sync) and IndexedDB (async)
     save() {
         try {
-            localStorage.setItem(this.storageKey, JSON.stringify(this.savedata));
+            try { localStorage.setItem(this.storageKey, JSON.stringify(this.savedata)); } catch (e) {}
+            // async write to IndexedDB
+            this._putKV('savedata', this.savedata).catch(()=>{});
         } catch (e) {
             console.error("Failed to save data:", e);
         }
