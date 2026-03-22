@@ -29,7 +29,7 @@ export class SpriteCollabTransport {
         if (typeof options.allowFirebaseData === 'boolean') {
             this.allowFirebaseData = options.allowFirebaseData;
         }
-        try { console.debug && console.debug('[collabTransport] setMode', this.mode, { allowFirebaseData: this.allowFirebaseData, hasWebRTCSender: !!this.webrtcSender }); } catch (e) {}
+        // collabTransport debug suppressed
     }
 
     setWebRTCSender(sendDiff) {
@@ -39,7 +39,7 @@ export class SpriteCollabTransport {
             // Immediately attempt to flush any queued diffs when a sender appears
             try { this._flushQueue(); } catch (e) {}
             this._ensureFlushTimer();
-            try { console.debug && console.debug('[collabTransport] setWebRTCSender -> sender bound, queued=', this._dataQueue ? this._dataQueue.length : 0); } catch (e) {}
+            // collabTransport debug suppressed
             return true;
         }
         return false;
@@ -101,7 +101,7 @@ export class SpriteCollabTransport {
             // IMPORTANT: we do NOT send diffs through the server to avoid server-side
             // data routing and billing. The queued diffs will be flushed when the
             // WebRTC data channel becomes available again.
-            try { this._enqueueDiff(diff); try { console.debug && console.debug('[collabTransport] sendDiff -> enqueued, queueLen=', this._dataQueue ? this._dataQueue.length : 0); } catch (e) {} } catch (e) { /* ignore enqueue errors */ }
+            try { this._enqueueDiff(diff); } catch (e) { /* ignore enqueue errors */ }
             return false;
         } catch (e) {
             return false;

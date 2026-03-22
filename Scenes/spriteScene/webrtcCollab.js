@@ -153,7 +153,7 @@ export class SpriteWebRTCCollabController {
         this.channel = channel;
         this.channel.onopen = () => {
             try {
-                if (this.scene && typeof this.scene.bindWebRTCCollab === 'function') {
+                    if (this.scene && typeof this.scene.bindWebRTCCollab === 'function') {
                     // Data channel is open — enable full WebRTC transport (not handshake-only)
                     this.scene.bindWebRTCCollab((diff) => {
                         try {
@@ -161,21 +161,21 @@ export class SpriteWebRTCCollabController {
                             this.channel.send(JSON.stringify({ kind: 'diff', diff }));
                         } catch (e) { /* ignore */ }
                     }, { handshakeOnly: false });
-                    try { console.debug && console.debug('[webrtcCollab] data channel open -> bindWebRTCCollab called'); } catch (e) {}
+                    // webrtcCollab debug suppressed
                 }
                 if (this.scene && this.scene.localState && this.scene.localState.collab) {
                     this.scene.localState.collab.webrtcReady = true;
                     this.scene.localState.collab.transportMode = 'webrtc';
                     // mark handshakeOnly=false so scene knows to send live diffs
                     this.scene.localState.collab.handshakeOnly = false;
-                    try { console.debug && console.debug('[webrtcCollab] localState.collab updated', this.scene.localState.collab); } catch (e) {}
+                    // webrtcCollab debug suppressed
                 }
                 try {
                     // Provide the raw data channel to the scene so it can send chunked
                     // large payloads without going through the JSON-diff path.
                     if (this.scene && typeof this.scene._setWebRTCChannel === 'function') {
                         this.scene._setWebRTCChannel(this.channel);
-                        try { console.debug && console.debug('[webrtcCollab] raw channel passed to scene'); } catch (e) {}
+                        // webrtcCollab debug suppressed
                     }
                 } catch (e) {}
             } catch (e) { /* ignore */ }
