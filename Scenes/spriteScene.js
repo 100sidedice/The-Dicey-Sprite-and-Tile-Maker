@@ -8323,7 +8323,14 @@ export class SpriteScene extends Scene {
                     if (this.selectionPoints && this.selectionPoints.length > 0) {
                         for (const p of this.selectionPoints) {
                             if (!p) continue;
-                            const target = this._resolveAnimFrameForArea(p.areaIndex, this.selectedAnimation, this.selectedFrame);
+                            // Prefer explicit per-point areaIndex; otherwise fall back to region or hovered tile
+                            let useArea = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
+                            if (useArea === null && this.selectionRegion && typeof this.selectionRegion.areaIndex === 'number') useArea = this.selectionRegion.areaIndex;
+                            if (useArea === null) {
+                                const posInfo = this.getPos(this.mouse && this.mouse.pos) || {};
+                                if (posInfo && typeof posInfo.areaIndex === 'number') useArea = posInfo.areaIndex;
+                            }
+                            const target = this._resolveAnimFrameForArea(useArea, this.selectedAnimation, this.selectedFrame);
                             const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
                             if (!frameCanvas) continue;
                             const ctx = frameCanvas.getContext('2d');
@@ -14624,6 +14631,22 @@ export class SpriteScene extends Scene {
             const prevSmooth = ctx.imageSmoothingEnabled;
             try { ctx.imageSmoothingEnabled = false; } catch (e) {}
 
+            const getScratch = (key) => {
+                if (!this._renderScratchCanvases || typeof this._renderScratchCanvases !== 'object') {
+                    this._renderScratchCanvases = Object.create(null);
+                }
+                let canvas = this._renderScratchCanvases[key];
+                if (!canvas) {
+                    canvas = document.createElement('canvas');
+                    this._renderScratchCanvases[key] = canvas;
+                }
+                const w = Math.max(1, Math.floor(sx));
+                const h = Math.max(1, Math.floor(sy));
+                if (canvas.width !== w) canvas.width = w;
+                if (canvas.height !== h) canvas.height = h;
+                return canvas;
+            };
+
             const drawTileAt = (col, row, isActive) => {
                 const x = bx + col * sx;
                 const y = by + row * sy;
@@ -14650,21 +14673,63 @@ export class SpriteScene extends Scene {
                     const b = entry.binding;
                     const anim = b.anim;
                     const multi = Array.isArray(b.multiFrames) ? b.multiFrames : null;
-                    ctx.save();
-                    ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
-                    if (multi && multi.length > 0) {
-                        for (let mi = 0; mi < multi.length; mi++) {
-                            const fi = Number(multi[mi]);
-                            if (!Number.isFinite(fi)) continue;
-                            const fr = frameFor(anim, fi);
-                            if (!fr) continue;
-                            ctx.drawImage(fr, dx, dy, dw, dh);
+                    const hasTransform = !!(entry.transform && ((entry.transform.rot || 0) !== 0 || entry.transform.flipH));
+                    if (!hasTransform) {
+                        ctx.save();
+                        ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                        if (multi && multi.length > 0) {
+                            for (let mi = 0; mi < multi.length; mi++) {
+                                const fi = Number(multi[mi]);
+                                if (!Number.isFinite(fi)) continue;
+                                const fr = frameFor(anim, fi);
+                                if (!fr) continue;
+                                ctx.drawImage(fr, dx, dy, dw, dh);
+                            }
+                        } else {
+                            const fr = frameFor(anim, Number(b.index) || 0);
+                            if (fr) ctx.drawImage(fr, dx, dy, dw, dh);
                         }
+                        ctx.restore();
                     } else {
-                        const fr = frameFor(anim, Number(b.index) || 0);
-                        if (fr) ctx.drawImage(fr, dx, dy, dw, dh);
+                        // Compose into scratch canvas and apply transform then draw
+                        const composeCanvas = getScratch('compose');
+                        const cctx = composeCanvas.getContext('2d');
+                        try { cctx.imageSmoothingEnabled = false; } catch (e) {}
+                        cctx.clearRect(0, 0, composeCanvas.width, composeCanvas.height);
+                        if (multi && multi.length > 0) {
+                            for (let mi = 0; mi < multi.length; mi++) {
+                                const fi = Number(multi[mi]);
+                                if (!Number.isFinite(fi)) continue;
+                                const fr = frameFor(anim, fi);
+                                if (!fr) continue;
+                                cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
+                            }
+                        } else {
+                            const fr = frameFor(anim, Number(b.index) || 0);
+                            if (fr) cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
+                        }
+
+                        let drawable = composeCanvas;
+                        try {
+                            const t = entry.transform || {};
+                            const tcanvas = getScratch('transform');
+                            const tctx = tcanvas.getContext('2d');
+                            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                            tctx.clearRect(0, 0, tcanvas.width, tcanvas.height);
+                            tctx.save();
+                            tctx.translate(tcanvas.width / 2, tcanvas.height / 2);
+                            if (t.flipH) tctx.scale(-1, 1);
+                            tctx.rotate((Number(t.rot || 0) * Math.PI) / 180);
+                            tctx.drawImage(composeCanvas, -tcanvas.width / 2, -tcanvas.height / 2);
+                            tctx.restore();
+                            drawable = tcanvas;
+                        } catch (e) {}
+
+                        ctx.save();
+                        ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                        ctx.drawImage(drawable, dx, dy, dw, dh);
+                        ctx.restore();
                     }
-                    ctx.restore();
                     if ((Number(entry.darken) || 0) > 0) {
                         ctx.save();
                         ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
@@ -16071,6 +16136,7 @@ export class SpriteScene extends Scene {
                     try { dctx.drawImage(tmp, 0, 0, dest.width, dest.height); } catch (e) { /* ignore draw errors */ }
                     try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
                     try { this._playSfx('tile.rotate'); } catch (e) {}
+                    try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
                     return true;
                 }
                 // fallback: replace physical slot if materialized frame not available
@@ -16084,10 +16150,11 @@ export class SpriteScene extends Scene {
                         if (entry.__groupStart || entry.__groupEnd) continue;
                         if (logical === 0) { found = i; break; }
                         logical--; }
-                    if (found !== -1) {
+                        if (found !== -1) {
                         arr[found] = tmp;
                         try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
                         try { this._playSfx('tile.rotate'); } catch (e) {}
+                        try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
                         return true;
                     }
                 }
@@ -16122,6 +16189,7 @@ export class SpriteScene extends Scene {
                     try { dctx.drawImage(tmp, 0, 0, dest.width, dest.height); } catch (e) { /* ignore draw errors */ }
                     try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
                     try { this._playSfx('tile.flip'); } catch (e) {}
+                    try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
                     return true;
                 }
                 if (sheet._frames && sheet._frames.has(anim)) {
@@ -16134,10 +16202,11 @@ export class SpriteScene extends Scene {
                         if (entry.__groupStart || entry.__groupEnd) continue;
                         if (logical === 0) { found = i; break; }
                         logical--; }
-                    if (found !== -1) {
+                        if (found !== -1) {
                         arr[found] = tmp;
                         try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
                         try { this._playSfx('tile.flip'); } catch (e) {}
+                        try { this._invalidateTileCachesForArea(areaIndex); } catch (e) {}
                         return true;
                     }
                 }

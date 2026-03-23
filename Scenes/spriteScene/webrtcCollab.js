@@ -111,12 +111,29 @@ export class SpriteWebRTCCollabController {
         if (this.pc) return this.pc;
         if (!this._canUseWebRTC()) return null;
 
-        const pc = new RTCPeerConnection({
-            iceServers: [
+        // Allow embedding apps to provide custom ICE servers via scene.collabIceServers
+        // or scene.collabConfig. Fall back to Google's public STUN servers if none provided.
+        let iceServers = null;
+        try {
+            if (this.scene) {
+                if (Array.isArray(this.scene.collabIceServers) && this.scene.collabIceServers.length > 0) {
+                    iceServers = this.scene.collabIceServers;
+                } else if (this.scene.collabConfig && Array.isArray(this.scene.collabConfig.iceServers) && this.scene.collabConfig.iceServers.length > 0) {
+                    iceServers = this.scene.collabConfig.iceServers;
+                } else if (this.scene._collabIceServers && Array.isArray(this.scene._collabIceServers) && this.scene._collabIceServers.length > 0) {
+                    iceServers = this.scene._collabIceServers;
+                }
+            }
+        } catch (e) { /* ignore */ }
+        if (!iceServers) {
+            iceServers = [
                 { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        });
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ];
+        }
+
+        const pc = new RTCPeerConnection({ iceServers });
 
         pc.onicecandidate = (event) => {
             try {

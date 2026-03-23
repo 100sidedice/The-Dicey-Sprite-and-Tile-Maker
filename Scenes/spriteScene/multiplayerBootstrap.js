@@ -82,6 +82,23 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                 sheet.insertFrame = (animation, index) => {
                     const result = originalInsertFrame(animation, index);
                     try { if (scene) scene._autosaveDirty = true; } catch (e) {}
+                    try {
+                        // Ensure new frames start with an explicit 10-bit closed connection key of all zeros.
+                        if (scene && typeof scene._setTileConnection === 'function') {
+                            try {
+                                const arr = sheet._frames.get(animation) || [];
+                                let logical = 0;
+                                for (let i = 0; i < arr.length; i++) {
+                                    const e = arr[i];
+                                    if (!e) continue;
+                                    if (e.__groupStart || e.__groupEnd) continue;
+                                    logical++;
+                                }
+                                const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, logical - 1);
+                                try { scene._setTileConnection(animation, opIndex, '0000000000', false); } catch (e) { if (!scene._tileConnMap) scene._tileConnMap = {}; scene._tileConnMap[animation + '::' + opIndex] = scene._normalizeOpenConnectionKey('0000000000'); }
+                            } catch (e) {}
+                        }
+                    } catch (e) {}
                     try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('insert', animation, index); } catch (e) {}
                     try {
                         const arr = sheet._frames.get(animation) || [];
@@ -125,32 +142,113 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                         }
                     } catch (e) {}
 
-                    const result = originalPopFrame(animation, index);
-                    try { if (scene) scene._autosaveDirty = true; } catch (e) {}
-                    try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('delete', animation, index); } catch (e) {}
+                    // Before removing the frame, gather all tile bindings that reference it and delete those tiles.
                     try {
-                        const arr = sheet._frames.get(animation) || [];
-                        let logical = 0;
-                        for (let i = 0; i < arr.length; i++) {
-                            const e = arr[i];
-                            if (!e) continue;
-                            if (e.__groupStart || e.__groupEnd) continue;
-                            logical++;
+                        const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, preLogical - 1);
+                        const layers = Array.isArray(scene._tileLayers) ? scene._tileLayers : [];
+                        const areasToMaybeDeactivate = new Set();
+                        for (let li = 0; li < layers.length; li++) {
+                            const layer = layers[li] || {};
+                            const bindings = Array.isArray(layer.bindings) ? layer.bindings : [];
+                            for (let ai = 0; ai < bindings.length; ai++) {
+                                const b = bindings[ai];
+                                if (!b) continue;
+                                if (b.anim === animation && Number.isFinite(Number(b.index)) && Number(b.index) === opIndex) {
+                                    try { if (typeof scene._setAreaBindingAtIndexForLayer === 'function') scene._setAreaBindingAtIndexForLayer(ai, li, null); else bindings[ai] = null; } catch (e) { try { bindings[ai] = null; } catch (er) {} }
+                                    try { if (typeof scene._setAreaTransformAtIndexForLayer === 'function') scene._setAreaTransformAtIndexForLayer(ai, li, null); else { if (Array.isArray(layer.transforms)) layer.transforms[ai] = null; } } catch (e) {}
+                                    areasToMaybeDeactivate.add(ai);
+                                }
+                            }
                         }
-                        if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
-                            const diff = {};
-                            diff['meta/animations/' + encodeURIComponent(animation)] = logical;
-                            const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, preLogical - 1);
-                            const id = (Date.now()) + '_' + Math.random().toString(36).slice(2, 6);
-                            diff['edits/' + id] = { type: 'struct', action: 'deleteFrame', anim: animation, index: opIndex, client: scene.clientId, time: Date.now() };
-                            try {
-                                const dataUrl = removedCanvas && removedCanvas.toDataURL ? removedCanvas.toDataURL('image/png') : null;
-                                scene._pushUndo({ type: 'delete-frame', anim: animation, index: opIndex, dataUrl, size: sheet.slicePx || 16, time: Date.now() });
-                            } catch (e) {}
-                            try { scene._sendCollabDiff(diff); } catch (e) {}
-                        }
+                        // Deactivate any tiles that now have no bindings across all layers
+                        try {
+                            for (const ai of Array.from(areasToMaybeDeactivate)) {
+                                try {
+                                    if (!scene._hasAnyTileLayerBindingAtIndex || typeof scene._hasAnyTileLayerBindingAtIndex !== 'function') continue;
+                                    if (!scene._hasAnyTileLayerBindingAtIndex(ai)) {
+                                        const coord = (Array.isArray(scene._tileIndexToCoord) && scene._tileIndexToCoord[ai]) ? scene._tileIndexToCoord[ai] : null;
+                                        if (coord && Number.isFinite(coord.col) && Number.isFinite(coord.row)) {
+                                            try { if (typeof scene._deactivateTile === 'function') scene._deactivateTile(coord.col, coord.row, false); else { const key = (coord.col|0) + '|' + (coord.row|0); if (scene._tileActive) scene._tileActive.delete(key); } } catch (e) {}
+                                        }
+                                    }
+                                } catch (e) {}
+                            }
+                        } catch (e) {}
                     } catch (e) {}
-                    return result;
+
+                    const result = originalPopFrame(animation, index);
+                        try { if (scene) scene._autosaveDirty = true; } catch (e) {}
+                        try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('delete', animation, index); } catch (e) {}
+                        try {
+                            const arr = sheet._frames.get(animation) || [];
+                            let logical = 0;
+                            for (let i = 0; i < arr.length; i++) {
+                                const e = arr[i];
+                                if (!e) continue;
+                                if (e.__groupStart || e.__groupEnd) continue;
+                                logical++;
+                            }
+                            if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
+                                const diff = {};
+                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, preLogical - 1);
+                                const id = (Date.now()) + '_' + Math.random().toString(36).slice(2, 6);
+                                diff['edits/' + id] = { type: 'struct', action: 'deleteFrame', anim: animation, index: opIndex, client: scene.clientId, time: Date.now() };
+                                try {
+                                    const dataUrl = removedCanvas && removedCanvas.toDataURL ? removedCanvas.toDataURL('image/png') : null;
+                                    scene._pushUndo({ type: 'delete-frame', anim: animation, index: opIndex, dataUrl, size: sheet.slicePx || 16, time: Date.now() });
+                                } catch (e) {}
+                                try { scene._sendCollabDiff(diff); } catch (e) {}
+                            }
+                        } catch (e) {}
+
+                        // Maintain tile connection mappings and area bindings when a frame is removed.
+                        try {
+                            if (!scene._tileConnMap || typeof scene._tileConnMap !== 'object') scene._tileConnMap = {};
+                            // determine logical opIndex used for delete (same as sent in diff)
+                            const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, preLogical - 1);
+
+                            // If a connection explicitly existed for the removed frame, delete it.
+                            try { delete scene._tileConnMap[animation + '::' + opIndex]; } catch (e) {}
+
+                            // Shift any later connection entries down by one to keep indices consistent.
+                            try {
+                                for (let i = opIndex + 1; i <= (preLogical - 1); i++) {
+                                    const fromKey = animation + '::' + i;
+                                    const toKey = animation + '::' + (i - 1);
+                                    if (Object.prototype.hasOwnProperty.call(scene._tileConnMap, fromKey)) {
+                                        try { scene._tileConnMap[toKey] = scene._tileConnMap[fromKey]; } catch (e) {}
+                                    } else {
+                                        try { delete scene._tileConnMap[toKey]; } catch (e) {}
+                                    }
+                                    try { delete scene._tileConnMap[fromKey]; } catch (e) {}
+                                }
+                            } catch (e) {}
+
+                            // Update area bindings across all layers: remove bindings that referenced the deleted frame,
+                            // and decrement indices greater than the removed index.
+                            try {
+                                const layers = Array.isArray(scene._tileLayers) ? scene._tileLayers : [];
+                                for (let li = 0; li < layers.length; li++) {
+                                    const layer = layers[li] || {};
+                                    if (!Array.isArray(layer.bindings)) continue;
+                                    for (let ai = 0; ai < layer.bindings.length; ai++) {
+                                        const b = layer.bindings[ai];
+                                        if (!b) continue;
+                                        if (b.anim === animation && typeof b.index === 'number') {
+                                            if (Number(b.index) === opIndex) {
+                                                try { if (typeof scene._setAreaBindingAtIndexForLayer === 'function') scene._setAreaBindingAtIndexForLayer(ai, li, null); else layer.bindings[ai] = null; } catch (e) { try { layer.bindings[ai] = null; } catch (er) {} }
+                                                try { if (typeof scene._setTileConnection === 'function') scene._setTileConnection(animation, ai, '0000000000', false); } catch (e) {}
+                                            } else if (Number(b.index) > opIndex) {
+                                                try { layer.bindings[ai].index = Number(b.index) - 1; } catch (e) {}
+                                            }
+                                            try { if (typeof scene._invalidateTileCachesForArea === 'function') scene._invalidateTileCachesForArea(ai); } catch (e) {}
+                                        }
+                                    }
+                                }
+                            } catch (e) {}
+                        } catch (e) {}
+                        return result;
                 };
             }
 

@@ -2889,18 +2889,18 @@ export default class FrameSelect {
             a.click();
             setTimeout(()=>{ URL.revokeObjectURL(url); try{ a.remove(); }catch(e){} }, 1500);
 
-            // trigger metadata download as a second file if requested
-            try{
-                if (wantMeta) {
-                    const murl = URL.createObjectURL(metaBlob);
-                    const ma = document.createElement('a');
-                    ma.href = murl;
-                    ma.download = metaFilename;
-                    document.body.appendChild(ma);
-                    // small delay to ensure browser registers separate clicks in sequence
-                    setTimeout(()=>{ ma.click(); setTimeout(()=>{ URL.revokeObjectURL(murl); try{ ma.remove(); }catch(e){} }, 1500); }, 250);
-                }
-            } catch (e) { /* ignore metadata fallback errors */ }
+            // // trigger metadata download as a second file if requested
+            // try{
+            //     if (wantMeta) {
+            //         const murl = URL.createObjectURL(metaBlob);
+            //         const ma = document.createElement('a');
+            //         ma.href = murl;
+            //         ma.download = metaFilename;
+            //         document.body.appendChild(ma);
+            //         // small delay to ensure browser registers separate clicks in sequence
+            //         setTimeout(()=>{ ma.click(); setTimeout(()=>{ URL.revokeObjectURL(murl); try{ ma.remove(); }catch(e){} }, 1500); }, 250);
+            //     }
+            // } catch (e) { /* ignore metadata fallback errors */ }
         } catch (e) { console.warn('export failed', e); }
     }
 
@@ -2919,6 +2919,8 @@ export default class FrameSelect {
             this._importInput.style.display = 'none';
             uiCanvas.parentNode.appendChild(this._importInput);
 
+            // No DOM mask: use in-canvas input masking via this.mouse.addMask when cursor is over buttons.
+
             this._importInput.addEventListener('change', (ev)=>{ this._handleImportFile(ev); });
         } catch (e) { console.warn('createImportExportUI failed', e); }
     }
@@ -2927,9 +2929,13 @@ export default class FrameSelect {
         const importPos = new Vector(1480, this._previewBuffer + 4);
         const btnSize = new Vector(140, 28);
         const exportPos = new Vector(1480, this._previewBuffer + 4 + btnSize.y + 6);
+        const savePos = new Vector(importPos.x, exportPos.y + btnSize.y + 6);
+        const clearPos = new Vector(importPos.x, savePos.y + btnSize.y + 6);
         return {
             importPos,
             exportPos,
+            savePos,
+            clearPos,
             btnSize
         };
     }
@@ -2958,7 +2964,68 @@ export default class FrameSelect {
                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
                     return;
                 }
+                // Save button
+                if (Geometry.pointInRect(this.mouse.pos, layout.savePos, layout.btnSize)) {
+                    try { if (window && window.Debug && typeof window.Debug.save === 'function') window.Debug.save(); } catch (e) {}
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    return;
+                }
+                // Clear tilemap button
+                if (Geometry.pointInRect(this.mouse.pos, layout.clearPos, layout.btnSize)) {
+                    try {
+                        // Clear in-scene tile structures
+                        if (this.scene) {
+                            try { this.scene._tileActive = new Set(); } catch (e) {}
+                            try { this.scene._tileActiveVersion = (Number.isFinite(this.scene._tileActiveVersion) ? this.scene._tileActiveVersion : 0) + 1; } catch (e) {}
+                            try { this.scene._areaBindings = []; } catch (e) {}
+                            try { this.scene._areaTransforms = []; } catch (e) {}
+                            try { this.scene._tileIndexToCoord = []; } catch (e) {}
+                            try { this.scene._tileCoordToIndex = new Map(); } catch (e) {}
+                            try { if (Array.isArray(this.scene._tileLayers)) { for (const l of this.scene._tileLayers) { if (l && Array.isArray(l.bindings)) l.bindings = []; if (l && Array.isArray(l.transforms)) l.transforms = []; } } } catch (e) {}
+                            try { if (typeof this.scene._scheduleTilemapSync === 'function') this.scene._scheduleTilemapSync(); else if (typeof this.scene._queueTileStateOp === 'function') this.scene._queueTileStateOp(); } catch (e) {}
+                            try {
+                                if (typeof this.scene._startCameraOffsetTween === 'function') {
+                                    try {
+                                        const baseArea = (typeof this.scene.computeDrawArea === 'function') ? this.scene.computeDrawArea() : null;
+                                        const slice = Math.max(1, Number((this.scene && this.scene.currentSprite && this.scene.currentSprite.slicePx) || 16));
+                                        if (baseArea && typeof this.scene._worldPixelToDrawWorld === 'function') {
+                                            const worldCenter = new Vector(0, 0);
+                                            const centerDraw = this.scene._worldPixelToDrawWorld(worldCenter, baseArea.topLeft, baseArea.size, slice);
+                                            if (centerDraw && this.scene.zoom && typeof this.scene.zoom.x === 'number') {
+                                                const targetOffsetX = (1920 / (2 * this.scene.zoom.x)) - centerDraw.x;
+                                                const targetOffsetY = (1080 / (2 * this.scene.zoom.y)) - centerDraw.y;
+                                                this.scene._startCameraOffsetTween(new Vector(targetOffsetX, targetOffsetY), 0.28);
+                                            } else {
+                                                this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
+                                            }
+                                        } else {
+                                            this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
+                                        }
+                                    } catch (e) {
+                                        try { this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28); } catch (e) {}
+                                    }
+                                } else if (this.scene.offset) { this.scene.offset.x = 1920/2; this.scene.offset.y = 1080/2; }
+                            } catch (e) {}
+                        }
+                    } catch (e) {}
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    return;
+                }
             }
+            // If cursor is over the import/export/save/clear button block while interacting, add input mask so clicks don't fallthrough
+            try {
+                const p = this.mouse && this.mouse.pos ? this.mouse.pos : null;
+                if (p) {
+                    const layout = this._getImportExportButtonLayout();
+                    const top = layout.importPos.clone();
+                    const bottomY = layout.clearPos.y + layout.btnSize.y;
+                    const fullSize = new Vector(layout.btnSize.x, bottomY - layout.importPos.y);
+                    const interacting = this.mouse.pressed('left') || this.mouse.held('left') || this.mouse.pressed('right') || this.mouse.held('right');
+                    if (Geometry.pointInRect(p, top, fullSize) && interacting) {
+                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    }
+                }
+            } catch (e) {}
         } catch (e) {}
 
         // Absorb input when cursor is over FrameSelect UI so map/tile tools don't also process click/drag.
@@ -4114,6 +4181,13 @@ export default class FrameSelect {
             this.UIDraw.text('Import Spritesheet', new Vector(layout.importPos.x + layout.btnSize.x/2, layout.importPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
             this.UIDraw.rect(layout.exportPos, layout.btnSize, '#225522');
             this.UIDraw.text('Export Spritesheet', new Vector(layout.exportPos.x + layout.btnSize.x/2, layout.exportPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+            // Save & Clear buttons beneath import/export
+            try {
+                this.UIDraw.rect(layout.savePos, layout.btnSize, '#333366');
+                this.UIDraw.text('Save', new Vector(layout.savePos.x + layout.btnSize.x/2, layout.savePos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+                this.UIDraw.rect(layout.clearPos, layout.btnSize, '#662222');
+                this.UIDraw.text('Clear Tilemap', new Vector(layout.clearPos.x + layout.btnSize.x/2, layout.clearPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+            } catch (e) {}
         } catch (e) {}
         // draw animation list under preview
         try{
