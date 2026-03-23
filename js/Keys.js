@@ -27,6 +27,11 @@ export default class Keys { // Key input
                 e.preventDefault();
                 e.stopPropagation();
             }
+            // Prevent Alt+F (and Shift+Alt+F) from triggering browser File menu
+            if ((e.key || '').toLowerCase() === 'f' && e.altKey) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
             if (e.key === " " || (e.altKey)) {
             }
             if (e.key === "/") {
@@ -45,6 +50,11 @@ export default class Keys { // Key input
         window.addEventListener("keyup", e => {
             if (shouldIgnore(e)) return; // ignore releases from debug input
             if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            // Mirror keydown: prevent Alt+F release default behavior
+            if ((e.key || '').toLowerCase() === 'f' && e.altKey) {
                 e.preventDefault();
                 e.stopPropagation();
             }

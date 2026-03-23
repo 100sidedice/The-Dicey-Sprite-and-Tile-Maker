@@ -2931,11 +2931,13 @@ export default class FrameSelect {
         const exportPos = new Vector(1480, this._previewBuffer + 4 + btnSize.y + 6);
         const savePos = new Vector(importPos.x, exportPos.y + btnSize.y + 6);
         const clearPos = new Vector(importPos.x, savePos.y + btnSize.y + 6);
+        const clearSavePos = new Vector(importPos.x, clearPos.y + btnSize.y + 6);
         return {
             importPos,
             exportPos,
             savePos,
             clearPos,
+            clearSavePos,
             btnSize
         };
     }
@@ -3011,6 +3013,22 @@ export default class FrameSelect {
                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
                     return;
                 }
+                // Clear save button (wipes saved data) — emit debug signal then reload page
+                if (Geometry.pointInRect(this.mouse.pos, layout.clearSavePos, layout.btnSize)) {
+                    try {
+                        if (window && window.Debug) {
+                            if (typeof window.Debug.emit === 'function') {
+                                window.Debug.emit('clearSave');
+                            } else if (typeof window.Debug.clearSave === 'function') {
+                                window.Debug.clearSave();
+                            }
+                        }
+                    } catch (e) {}
+                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                    // Allow a short delay for saver/IndexedDB writes to settle, then reload
+                    try { setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 150); } catch (e) {}
+                    return;
+                }
             }
             // If cursor is over the import/export/save/clear button block while interacting, add input mask so clicks don't fallthrough
             try {
@@ -3018,7 +3036,7 @@ export default class FrameSelect {
                 if (p) {
                     const layout = this._getImportExportButtonLayout();
                     const top = layout.importPos.clone();
-                    const bottomY = layout.clearPos.y + layout.btnSize.y;
+                    const bottomY = (layout.clearSavePos ? layout.clearSavePos.y + layout.btnSize.y : layout.clearPos.y + layout.btnSize.y);
                     const fullSize = new Vector(layout.btnSize.x, bottomY - layout.importPos.y);
                     const interacting = this.mouse.pressed('left') || this.mouse.held('left') || this.mouse.pressed('right') || this.mouse.held('right');
                     if (Geometry.pointInRect(p, top, fullSize) && interacting) {
@@ -4187,6 +4205,8 @@ export default class FrameSelect {
                 this.UIDraw.text('Save', new Vector(layout.savePos.x + layout.btnSize.x/2, layout.savePos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
                 this.UIDraw.rect(layout.clearPos, layout.btnSize, '#662222');
                 this.UIDraw.text('Clear Tilemap', new Vector(layout.clearPos.x + layout.btnSize.x/2, layout.clearPos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
+                this.UIDraw.rect(layout.clearSavePos, layout.btnSize, '#662244');
+                this.UIDraw.text('Clear Save', new Vector(layout.clearSavePos.x + layout.btnSize.x/2, layout.clearSavePos.y + layout.btnSize.y/2 + 6), '#FFFFFF', 0, 13, { align: 'center', font: 'monospace' });
             } catch (e) {}
         } catch (e) {}
         // draw animation list under preview

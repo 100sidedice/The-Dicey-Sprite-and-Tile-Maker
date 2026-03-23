@@ -2501,6 +2501,25 @@ export class SpriteScene extends Scene {
         }
     }
 
+    // Ensure camera-related vectors are valid; reset if missing/invalid.
+    _sanitizeCamera() {
+        try {
+            const ensureVec = (name, defX = 0, defY = 0) => {
+                const v = this[name];
+                if (!v || typeof v.x !== 'number' || !Number.isFinite(v.x) || typeof v.y !== 'number' || !Number.isFinite(v.y)) {
+                    this[name] = new Vector(defX, defY);
+                }
+            };
+            // Vectors that should default to 0,0
+            ['offset', 'zoomPos', 'pan', 'panVlos', 'zoomVlos'].forEach(n => ensureVec(n, 0, 0));
+            // Zoom defaults to 1,1
+            const z = this.zoom;
+            if (!z || typeof z.x !== 'number' || !Number.isFinite(z.x) || typeof z.y !== 'number' || !Number.isFinite(z.y)) {
+                this.zoom = new Vector(1, 1);
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     _isAnimationAvailable(animName) {
         try {
             const name = String(animName || '').trim();
@@ -3371,6 +3390,8 @@ export class SpriteScene extends Scene {
     // tick handler: called by Scene.tick() via sceneTick
     sceneTick(tickDelta){
         this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
+        // Ensure camera vectors are valid each frame to avoid stuck-at-0,0 bugs
+        try { this._sanitizeCamera(); } catch (e) {}
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
         try {

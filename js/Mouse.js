@@ -43,6 +43,11 @@ export default class Mouse {
                     e.preventDefault();
                     e.stopImmediatePropagation();
                 }
+                // If user does shift + right-click, prevent default browser behavior
+                if (typeof e.button === 'number' && e.button === 2 && e.shiftKey) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
             } catch (ex) {}
             this._onMove(e);
             this._setButton(e.button, 1);
@@ -57,6 +62,15 @@ export default class Mouse {
                     e.stopImmediatePropagation();
                 }
             } catch (ex) {}
+        });
+        // Prevent browser context menu / behavior for shift+right-click inside the app
+        window.addEventListener('contextmenu', e => {
+            try {
+                if (e.shiftKey) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }
+            } catch (err) {}
         });
         // capture wheel events; we may want to override ctrl+wheel for zooming
         this._lastWheelDelta = 0;
