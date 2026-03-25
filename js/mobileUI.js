@@ -42,6 +42,11 @@ window.addEventListener('pointerdown', e => { lastPointer.x = e.clientX; lastPoi
 
 let pasteArmed = false;
 let pasteAutoReleaseTimer = null;
+// Snapshot of pointer position when paste is armed so releasing via UI
+// pastes at the intended canvas location instead of the button coordinates.
+// (No snapshotting — always use current mouse position for paste)
+// Sidebar Paste button reference (used to show armed state with brackets)
+let mobilePasteButton = null;
 // Toggle mode: when true, Control is held (eyedropper mode)
 let ctrlMode = false;
 
@@ -51,9 +56,11 @@ let shiftMode = false;
 const armPaste = () => {
     if (pasteArmed) return;
     pasteArmed = true;
+    try { if (mobilePasteButton) mobilePasteButton.textContent = '[Paste]'; } catch (e) {}
     simulateKey('v', { down: true }); // keydown only, hold until second press
     // block drawing/pen while paste is armed
     try { if (window.program && window.program.mouse) window.program.mouse.uiBlockedByOverlay = true; } catch (e) {}
+    try { window.mobileUIPasteArmed = true; } catch (e) {}
     // auto-release after 8s to avoid stuck state
     pasteAutoReleaseTimer = setTimeout(() => {
         if (pasteArmed) {
@@ -68,14 +75,32 @@ const releasePaste = () => {
     pasteArmed = false;
     clearTimeout(pasteAutoReleaseTimer);
     // keyup to trigger paste behavior
+    // Do not restore any previous pointer snapshot — always use current mouse.pos
     const ku = new KeyboardEvent('keyup', { key: 'v', bubbles: true, cancelable: true });
     window.dispatchEvent(ku);
     // restore drawing state
     try { if (window.program && window.program.mouse) window.program.mouse.uiBlockedByOverlay = false; } catch (e) {}
+    try { window.mobileUIPasteArmed = false; } catch (e) {}
+    try { if (mobilePasteButton) mobilePasteButton.textContent = 'Paste'; } catch (e) {}
 };
 
 const makeButton = (label, onClick, extraCls='') => {
     const b = createEl('button', 'mobile-btn ' + extraCls, label);
+    // Prevent text selection and default tap highlights on mobile devices
+    try {
+        b.style.userSelect = 'none';
+        b.style.webkitUserSelect = 'none';
+        b.style.msUserSelect = 'none';
+        b.style.MozUserSelect = 'none';
+        b.style.setProperty('-webkit-user-select', 'none');
+        b.style.setProperty('-webkit-tap-highlight-color', 'transparent');
+        b.style.setProperty('-webkit-touch-callout', 'none');
+        b.style.touchAction = 'manipulation';
+        b.setAttribute('unselectable', 'on');
+        b.addEventListener('selectstart', (e) => e.preventDefault());
+        b.addEventListener('dragstart', (e) => e.preventDefault());
+        b.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); });
+    } catch (e) {}
     // Increase visual/touch size for easier tapping
     try {
         b.style.minHeight = '48px';
@@ -173,13 +198,57 @@ const buildUI = () => {
     });
     sc.appendChild(btnF);
     // Copy
-    sc.appendChild(makeButton('Copy', () => simulateKey('c')));
-    // Cut
-    sc.appendChild(makeButton('Cut', () => simulateKey('x')));
-    // Paste (two-press behavior)
-    sc.appendChild(makeButton('Paste', () => {
-        if (!pasteArmed) armPaste(); else releasePaste();
+    sc.appendChild(makeButton('Copy', () => {
+        try {
+            const prog = window.program;
+            const scene = prog && (prog.game && prog.game.currentScene ? prog.game.currentScene : prog.currentScene);
+            if (scene && scene.tilemode && typeof scene.doCopy === 'function') {
+                scene.doCopy();
+                return;
+            }
+        } catch (e) {}
+        simulateKey('c');
     }));
+    // Cut
+    sc.appendChild(makeButton('Cut', () => {
+        try {
+            const prog = window.program;
+            const scene = prog && (prog.game && prog.game.currentScene ? prog.game.currentScene : prog.currentScene);
+            if (scene && scene.tilemode && typeof scene.doCut === 'function') {
+                scene.doCut();
+                return;
+            }
+        } catch (e) {}
+        simulateKey('x');
+    }));
+    // Paste (two-press behavior)
+    const btnPaste = makeButton('Paste', () => {
+        try {
+            const prog = window.program;
+            const scene = prog && (prog.game && prog.game.currentScene ? prog.game.currentScene : prog.currentScene);
+            if (!pasteArmed) {
+                armPaste();
+            } else {
+                // If tilemode, call doPaste directly to avoid relying on key events
+                if (scene && scene.tilemode && typeof scene.doPaste === 'function') {
+                    try {
+                        scene.doPaste(scene.mouse && scene.mouse.pos);
+                    } catch (e) {}
+                    // clear armed state
+                    pasteArmed = false;
+                    clearTimeout(pasteAutoReleaseTimer);
+                    try { if (window.program && window.program.mouse) window.program.mouse.uiBlockedByOverlay = false; } catch (e) {}
+                    try { window.mobileUIPasteArmed = false; } catch (e) {}
+                    try { if (mobilePasteButton) mobilePasteButton.textContent = 'Paste'; } catch (e) {}
+                    return;
+                }
+                // fallback to keyboard-based release
+                releasePaste();
+            }
+        } catch (e) { try { releasePaste(); } catch (ee) {} }
+    });
+    sc.appendChild(btnPaste);
+    mobilePasteButton = btnPaste;
     // Remove frame: directly invoke FrameSelect removal when possible, fallback to Backspace key
     sc.appendChild(makeButton('Remove Frame', () => {
         try {

@@ -110,6 +110,37 @@ export default class Mouse {
         // Note: older touch listeners removed — pointer events handle touch reliably.
     }
 
+    _eventInCentral16x9(e) {
+        try {
+            const w = window.innerWidth || 0;
+            const h = window.innerHeight || 0;
+            if (!w || !h) return true;
+            const cx = w / 2;
+            const cy = h / 2;
+            let regionW, regionH;
+            const targetAspect = 16/9;
+            if (w / h >= targetAspect) {
+                // height bounds region
+                regionH = h;
+                regionW = regionH * targetAspect;
+            } else {
+                // width bounds region
+                regionW = w;
+                regionH = regionW / targetAspect;
+            }
+            const left = cx - regionW/2;
+            const right = cx + regionW/2;
+            const top = cy - regionH/2;
+            const bottom = cy + regionH/2;
+            const x = (e && typeof e.clientX === 'number') ? e.clientX : (e && typeof e.x === 'number' ? e.x : null);
+            const y = (e && typeof e.clientY === 'number') ? e.clientY : (e && typeof e.y === 'number' ? e.y : null);
+            if (x === null || y === null) return true;
+            return (x >= left && x <= right && y >= top && y <= bottom);
+        } catch (err) {
+            return true;
+        }
+    }
+
     _onPointerDown(e) {
         try {
             if (typeof e.button === 'number' && (e.button === 3 || e.button === 4)) {
@@ -125,19 +156,23 @@ export default class Mouse {
         const x = e.clientX; const y = e.clientY;
         this.pointers.set(e.pointerId, { x, y, button: e.button, pointerType: e.pointerType });
         if (this._primaryPointerId === null) this._primaryPointerId = e.pointerId;
-        // update pos from primary
+        // update pos from primary only if the event is inside central 16:9 region
         if (this._primaryPointerId === e.pointerId) {
-            this._onMove(e);
+            if (this._eventInCentral16x9(e)) this._onMove(e);
         }
         // For touch, prevent default to avoid scrolling
         try { if (e.pointerType === 'touch') e.preventDefault(); } catch (err) {}
-        // Update button states: left should be true while any pointer exists
-        if (e.button === 1) this._setButton(1, 1);
-        if (e.button === 2) this._setButton(2, 1);
-        // left mouse/touch
-        if (typeof e.button !== 'number' || e.button === 0) {
-            this._setButton(0, 1);
-        }
+        // Update button states only if the event is inside the central 16:9 region
+        try {
+            if (this._eventInCentral16x9(e)) {
+                if (e.button === 1) this._setButton(1, 1);
+                if (e.button === 2) this._setButton(2, 1);
+                // left mouse/touch
+                if (typeof e.button !== 'number' || e.button === 0) {
+                    this._setButton(0, 1);
+                }
+            }
+        } catch (err) {}
     }
 
     _onPointerMove(e) {
@@ -184,7 +219,9 @@ export default class Mouse {
             return; // don't call primary pointer move while gesturing
         }
 
-        if (this._primaryPointerId === e.pointerId) this._onMove(e);
+        if (this._primaryPointerId === e.pointerId) {
+            if (this._eventInCentral16x9(e)) this._onMove(e);
+        }
     }
 
     _onPointerUp(e) {
@@ -220,6 +257,9 @@ export default class Mouse {
     }
 
     _onMove(e) {
+        // Ignore moves that are outside the central 16:9 region to avoid UI taps
+        // moving the canvas cursor. Use screen coordinates to avoid scaling issues.
+        if (!this._eventInCentral16x9(e)) return;
         this.prevPos = this.pos.clone();
         this.pos = new Vector(
             (e.clientX - this.rect.left + this.offset.x) * this.scale/this.canvasScale.x,
@@ -335,6 +375,7 @@ export default class Mouse {
     pressed(button = null) {
         if (this.offCanvas) return false;
         if (this.uiBlockedByOverlay) return false;
+        try { if (window.mobileUIPasteArmed) return false; } catch (e) {}
         if (button === null || button === 'any') {
             return this.pressed("left") || this.pressed("middle") || this.pressed("right");
         }
@@ -347,6 +388,7 @@ export default class Mouse {
     held(button, returnTime = false) {
         if (this.offCanvas) return returnTime ? 0 : false;
         if (this.uiBlockedByOverlay) return returnTime ? 0 : false;
+        try { if (window.mobileUIPasteArmed) return returnTime ? 0 : false; } catch (e) {}
         if (this.pauseTime > 0) return returnTime ? 0 : false;
         if (!this._allowed()) return returnTime ? 0 : false;
         const b = this.buttons[button];
@@ -356,6 +398,7 @@ export default class Mouse {
     released(button) {
         if (this.offCanvas) return false;
         if (this.uiBlockedByOverlay) return false;
+        try { if (window.mobileUIPasteArmed) return false; } catch (e) {}
         if (this.pauseTime > 0) return false;
         if (!this._allowed()) return false;
         return !!this.buttons[button].justReleased;
@@ -371,6 +414,7 @@ export default class Mouse {
 
     scroll(mode = null, returnBool = false) {
         if (this.uiBlockedByOverlay) return returnBool ? false : 0;
+        try { if (window.mobileUIPasteArmed) return returnBool ? false : 0; } catch (e) {}
         if (!this._allowed()) return returnBool ? false : 0;
         let delta = this._lastScroll;
         if (mode === "up" && delta >= 0) delta = 0;
