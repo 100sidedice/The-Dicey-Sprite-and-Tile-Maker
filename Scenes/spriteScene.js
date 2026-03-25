@@ -3866,7 +3866,7 @@ export class SpriteScene extends Scene {
         // Undo / Redo shortcuts
         try {
             const ctrlDown = this.keys.held('Control') || this.keys.held('ControlLeft') || this.keys.held('ControlRight') || this.keys.held('Meta');
-            if (ctrlDown && this.keys.released('z')) {
+            if (this.keys.released('z')|| this.keys.released('Z')) {
                 if (this.keys.held('Shift')) {
                     try { this.redo(); } catch (e) { console.warn('redo failed', e); }
                 } else {

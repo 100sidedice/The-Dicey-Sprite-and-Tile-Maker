@@ -126,6 +126,10 @@ const buildUI = () => {
     // Right panel (scrollable)
     const right = createEl('div', 'mobile-right-panel');
     const sc = createEl('div', 'mobile-scroll');
+    // Undo (Z) — first/top button in right panel, single-tap like 'A'
+    const btnZ = makeButton('Z', () => simulateKey('z'));
+    btnZ.title = 'Undo';
+    sc.appendChild(btnZ);
     // Copy
     sc.appendChild(makeButton('Copy', () => simulateKey('c')));
     // Cut
