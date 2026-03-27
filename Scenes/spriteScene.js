@@ -17,6 +17,9 @@ import AutoTileGenerationMenu from './spriteScene/AutoTileGenerationMenu.js';
 import AutoTileGenerator from './AutoTileGenerator.js';
 import installDebugTextures from './debugTextures.js';
 
+import { _drawHeld } from './spriteScene/controls-and-navigation/mobilecontrols.js';
+import { panScreen } from './spriteScene/controls-and-navigation/cameraNav.js';
+
 export class SpriteScene extends Scene {
     constructor(...args) {
         super('spriteScene', ...args);
@@ -497,19 +500,6 @@ export class SpriteScene extends Scene {
         this.isReady = true;
     }
 
-    // Helper: robust draw-held check that requires a short hold on touch devices
-    _drawHeld(button, minHold = 0.05) {
-        try {
-            const isTouch = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0));
-            if (!isTouch) return !!(this.mouse && typeof this.mouse.held === 'function' && this.mouse.held(button));
-            // return held time compared against threshold
-            if (!(this.mouse && typeof this.mouse.held === 'function')) return false;
-            const t = this.mouse.held(button, true);
-            return !!(t && t >= Number(minHold) );
-        } catch (e) {
-            try { return !!(this.mouse && typeof this.mouse.held === 'function' && this.mouse.held(button)); } catch (ee) { return false; }
-        }
-    }
 
     connectDebug(){
         // Register debug signal to grayscale the current frame
@@ -1599,33 +1589,7 @@ export class SpriteScene extends Scene {
         });
     }
     
-    // Handle wheel-based panning. 
-    panScreen(tickDelta){
-        if (this.keys.held('Control')) return;
-
-
-        let wheelY = 0, wheelX = 0;
-        // Use scroll() to capture vertical pan from touch gestures (two-finger pan)
-        try { wheelY = this.mouse.scroll(); } catch (e) { wheelY = this.mouse.wheel(); }
-        try { wheelX = this.mouse.wheelX(); } catch (e) { wheelX = 0; }
-        
-        // Convert wheel deltas to pan velocity impulses. We divide by zoom so panning speed feels consistent at different zoom levels.
-        const zX = this.zoom.x;
-        const zY = this.zoom.y;
-        // combine horizontal movement: native horizontal wheel plus vertical wheel when Shift held
-
-        let horiz = wheelX || 0;
-        let vert = wheelY || 0;
-        if (this.keys.held('Shift') || this.mouse.held('middle')) {
-            horiz += wheelY; // map vertical scroll into horizontal pan
-            vert = 0; // suppress vertical pan while Shift is held
-        }
-        // invert direction so wheel down moves content up (typical UX)
-        const impulseX = -horiz * (this.localState.camera.panImpulse) * (1 / zX);
-        const impulseY = -vert * (this.localState.camera.panImpulse) * (1 / zY);
-        this.panVlos.x += impulseX;
-        this.panVlos.y += impulseY;
-    }
+    
     
     zoomScreen(tickDelta){
         try {
@@ -1668,6 +1632,7 @@ export class SpriteScene extends Scene {
             console.warn('zoomScreen failed', e);
         }
     }
+
     // Map a screen position (Vector) into frame pixel coordinates.
     // If screenPos omitted, uses this.mouse.pos. Returns {inside, x, y, relX, relY}
     getPos(screenPos = null) {
@@ -3959,7 +3924,7 @@ export class SpriteScene extends Scene {
             // handle ctrl+wheel zoom (adds velocity impulses)
             this.zoomScreen(tickDelta);
             // handle wheel-based panning (horizontal/vertical wheel)
-            this.panScreen(tickDelta);
+            panScreen(this.keys,this.mouse,this.zoom, this.panVlos,this.localState)
 
             // Integrate zoom velocity for smooth zooming
             try {
@@ -4208,12 +4173,12 @@ export class SpriteScene extends Scene {
             const sheet = this.currentSprite;
             // If clipboard brush mode is active, paste (left) or erase (right) with clipboard shape instead of square brush
             if (this._clipboardBrushActive && this.clipboard) {
-                if (this._drawHeld('left')) {
+                if (_drawHeld(this.mouse,'left')) {
                     try { if (this.mouse.pressed('left')) this._playSfx('clipboard.paste'); } catch (e) {}
                     this.doPaste(this.mouse.pos, { playSfx: false });
                     return;
                 }
-                if (this._drawHeld('right')) {
+                if (_drawHeld(this.mouse,'right')) {
                     try { if (this.mouse.pressed('right')) this._playSfx('clipboard.erase'); } catch (e) {}
                     this.doClipboardErase(this.mouse.pos, { playSfx: false });
                     return;
@@ -4302,13 +4267,13 @@ export class SpriteScene extends Scene {
             };
 
             // Reset pixel-perfect stroke bookkeeping when no draw buttons are held.
-            if (!this._drawHeld('left') && !this._drawHeld('right')) {
+            if (!_drawHeld(this.mouse,'left') && !_drawHeld(this.mouse,'right')) {
                 this._pixelPerfectStrokeActive = false;
                 this._pixelPerfectHistory = [];
                 this._pixelPerfectOriginals = new Map();
             }
 
-            if (this._drawHeld('left')) {
+            if (_drawHeld(this.mouse,'left')) {
                 // If mobile F-toggle is active, perform flood-fill on press instead of drawing
                 const mobileF = (typeof window !== 'undefined' && window.mobileKeyToggles && (window.mobileKeyToggles['f'] || window.mobileKeyToggles['F']));
                 if (mobileF && this.mouse.pressed('left')) {
@@ -4389,7 +4354,7 @@ export class SpriteScene extends Scene {
                     if (_wpChanged) this._paintWorldPixels(worldPixels, color);
                 }
             }
-            if (this._drawHeld('right')) { // erase NxN square
+            if (_drawHeld(this.mouse,'right')) { // erase NxN square
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
@@ -4478,7 +4443,7 @@ export class SpriteScene extends Scene {
             const baseBinding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
             const baseTransform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
 
-            if (this._drawHeld('left')) {
+            if (_drawHeld(this.mouse,'left')) {
                 const updateSet = this._autotileNeighborCoordSet || (this._autotileNeighborCoordSet = new Set());
                 if (this.autotile) updateSet.clear();
                 for (const t of tiles) {
@@ -4522,7 +4487,7 @@ export class SpriteScene extends Scene {
                         this._applyAutotileAt(p.col, p.row, logical);
                     }
                 }
-            } else if (this._drawHeld('right')) {
+            } else if (_drawHeld(this.mouse,'right')) {
                 // If tiles are selected, right-drag acts as deselect instead of erase
                 if (this._tileSelection && this._tileSelection.size > 0) {
                     for (const t of tiles) this._tileSelection.delete(this._tileKey(t.col, t.row));
@@ -7327,16 +7292,16 @@ export class SpriteScene extends Scene {
                     // Tile selection in render-only tilemode
                     if (!this._tileSelection) this._tileSelection = new Set();
                     const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1, this._tileBrushTilesBuffer);
-                    if (this._drawHeld('left')) {
+                    if (_drawHeld(this.mouse,'left')) {
                         for (const t of tileBrush) this._tileSelection.add(this._tileKey(t.col, t.row));
-                    } else if (this._drawHeld('right')) {
+                    } else if (_drawHeld(this.mouse,'right')) {
                         for (const t of tileBrush) this._tileSelection.delete(this._tileKey(t.col, t.row));
                     }
                     return;
                 }
                 const posSel = this.getPos(this.mouse.pos);
                 if (posSel && posSel.inside) {
-                    if (this._drawHeld('left')) {
+                    if (_drawHeld(this.mouse,'left')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
@@ -7371,7 +7336,7 @@ export class SpriteScene extends Scene {
                                 }
                             }
                         }
-                    } else if (this._drawHeld('right')) {
+                    } else if (_drawHeld(this.mouse,'right')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
