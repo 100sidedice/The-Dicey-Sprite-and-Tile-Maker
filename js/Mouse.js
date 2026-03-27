@@ -196,9 +196,9 @@ export default class Mouse {
                 this.uiBlockedByOverlay = true;
                 // release left button state to avoid stray drawing
                 this._setButton(0, 0);
+                this.pause(0.1)
             } else {
                 // compute zoom delta
-                // compute zoom delta and ignore tiny jitter to avoid accidental zoom while panning
                 const delta = dist - (this._gesturePrevDist || dist);
                 const PINCH_JITTER_THRESHOLD = 2; // pixels
                 const ZOOM_SENSITIVITY = 2;
