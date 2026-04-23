@@ -342,6 +342,7 @@ export class SpriteScene extends Scene {
                                 }
                                 this._activeTileLayerIndex = Math.max(0, Math.min(Number(layout.activeTileLayerIndex) | 0, this._tileLayers.length - 1));
                                 this._syncActiveTileLayerReferences();
+                                try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
                             } else {
                                 if (Array.isArray(layout.bindings)) {
                                     this._areaBindings = [];
@@ -2315,8 +2316,9 @@ export class SpriteScene extends Scene {
                 if (this._tileLayers.length <= 0) {
                     this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: [], transforms: [] }];
                 }
-                this._activeTileLayerIndex = this._resolveTileLayerIndex(tilemapState.activeTileLayerIndex, false);
-                this._syncActiveTileLayerReferences();
+                    this._activeTileLayerIndex = this._resolveTileLayerIndex(tilemapState.activeTileLayerIndex, false);
+                    this._syncActiveTileLayerReferences();
+                    try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             }
 
             if (incomingLayers.length <= 0) {
@@ -12630,6 +12632,7 @@ export class SpriteScene extends Scene {
                 if (this._tileLayers.length <= 0) this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: [], transforms: [] }];
                 this._activeTileLayerIndex = this._resolveTileLayerIndex(snapshot.activeTileLayerIndex, false);
                 this._syncActiveTileLayerReferences();
+                try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             }
 
             this._adoptCurrentTileArraysIntoActiveLayer();
@@ -13201,6 +13204,7 @@ export class SpriteScene extends Scene {
                 const maxLayer = Math.max(0, this._tileLayers.length - 1);
                 this._activeTileLayerIndex = Math.max(0, Math.min(Number(state.activeTileLayerIndex) | 0, maxLayer));
                 this._syncActiveTileLayerReferences();
+                try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             } else {
                 this._areaBindings = [];
                 const bindings = Array.isArray(state.bindings) ? state.bindings : [];
@@ -14845,7 +14849,14 @@ export class SpriteScene extends Scene {
                 if (!isActive) {
                     if (hoverCoord && col === hoverCoord.col && row === hoverCoord.row) {
                         ctx.fillStyle = '#222222DD';
-                        ctx.fillRect(dx, dy, dw, dh);
+                        // Snap hover rect to integer pixels to avoid subpixel seams
+                        const _hx = Math.floor(dx + 1e-6);
+                        const _hy = Math.floor(dy + 1e-6);
+                        const _hr = Math.ceil(dx + dw - 1e-6);
+                        const _hb = Math.ceil(dy + dh - 1e-6);
+                        const _hw = Math.max(1, _hr - _hx);
+                        const _hh = Math.max(1, _hb - _hy);
+                        ctx.fillRect(_hx, _hy, _hw, _hh);
                         ctx.strokeStyle = '#000000AA';
                         ctx.lineWidth = Math.max(1, Math.round(scaleX));
                         ctx.strokeRect(dx + 0.5, dy + 0.5, Math.max(1, dw - 1), Math.max(1, dh - 1));
@@ -14922,7 +14933,14 @@ export class SpriteScene extends Scene {
                         ctx.save();
                         ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
                         ctx.fillStyle = '#000000';
-                        ctx.fillRect(dx, dy, dw, dh);
+                        // Snap darken rect to integer pixels to avoid gaps from fractional math
+                        const _lx = Math.floor(dx + 1e-6);
+                        const _ty = Math.floor(dy + 1e-6);
+                        const _rx = Math.ceil(dx + dw - 1e-6);
+                        const _by = Math.ceil(dy + dh - 1e-6);
+                        const _w = Math.max(1, _rx - _lx);
+                        const _h = Math.max(1, _by - _ty);
+                        ctx.fillRect(_lx, _ty, _w, _h);
                         ctx.restore();
                     }
                 }
@@ -15061,66 +15079,66 @@ export class SpriteScene extends Scene {
             const base = document.createElement('canvas');
             base.width = ts * 2;
             base.height = ts * 2;
-                                    const tctx = topFrame.getContext('2d');
-                                    const wctx = wallFrame.getContext('2d');
-                                    const topImg = tctx.getImageData(0, 0, px, px).data;
-                                    const wallImg = wctx.getImageData(0, 0, px, px).data;
-                                    const odata = outImage.data;
-                                    const seamY = Math.max(0, bottomBoundary);
-                                    // Determine which connection bits indicate bottom/outside
-                                    const edgeBottomOutside = !!bits[2];
-                                    const cornerBROutside = !!bits[6];
-                                    const cornerBLOutside = !!bits[7];
-                                    // Only trigger wall compositing when the bottom edge is outside.
-                                    // Ignore corner-only outside signals so left/right edges forcing
-                                    // corner bits don't cause bottom compositing.
-                                    const needWall = edgeBottomOutside;
-                                    try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
-                                    if (!needWall) {
-                                        // copy top frame entirely
-                                        outImage.data.set(topImg);
-                                    } else {
-                                        // corner sizing - match later outline corner math
-                                        const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
-                                        const cornerZone = Math.max(1, Math.floor(cornerRadiusLocal));
-                                        const isInBottomRightCorner = (xx, yy) => {
-                                            return ((px - 1 - xx) <= cornerZone) && ((px - 1 - yy) <= cornerZone);
-                                        };
-                                        const isInBottomLeftCorner = (xx, yy) => {
-                                            return (xx <= cornerZone) && ((px - 1 - yy) <= cornerZone);
-                                        };
-                                        for (let yy = 0; yy < px; yy++) {
-                                            for (let xx = 0; xx < px; xx++) {
-                                                const idx = (yy * px + xx) * 4;
-                                                // keep top pixels above seam
-                                                if (yy <= seamY) {
-                                                    odata[idx] = topImg[idx];
-                                                    odata[idx + 1] = topImg[idx + 1];
-                                                    odata[idx + 2] = topImg[idx + 2];
-                                                    odata[idx + 3] = topImg[idx + 3];
-                                                    continue;
-                                                }
-                                                // below seam: only replace where bottom/outside is requested
-                                                let useWall = false;
-                                                if (edgeBottomOutside) useWall = true;
-                                                else if (cornerBROutside && isInBottomRightCorner(xx, yy)) useWall = true;
-                                                else if (cornerBLOutside && isInBottomLeftCorner(xx, yy)) useWall = true;
+            const tctx = topFrame.getContext('2d');
+            const wctx = wallFrame.getContext('2d');
+            const topImg = tctx.getImageData(0, 0, px, px).data;
+            const wallImg = wctx.getImageData(0, 0, px, px).data;
+            const odata = outImage.data;
+            const seamY = Math.max(0, bottomBoundary);
+            // Determine which connection bits indicate bottom/outside
+            const edgeBottomOutside = !!bits[2];
+            const cornerBROutside = !!bits[6];
+            const cornerBLOutside = !!bits[7];
+            // Only trigger wall compositing when the bottom edge is outside.
+            // Ignore corner-only outside signals so left/right edges forcing
+            // corner bits don't cause bottom compositing.
+            const needWall = edgeBottomOutside;
+            try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
+            if (!needWall) {
+                // copy top frame entirely
+                outImage.data.set(topImg);
+            } else {
+                // corner sizing - match later outline corner math
+                const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
+                const cornerZone = Math.max(1, Math.floor(cornerRadiusLocal));
+                const isInBottomRightCorner = (xx, yy) => {
+                    return ((px - 1 - xx) <= cornerZone) && ((px - 1 - yy) <= cornerZone);
+                };
+                const isInBottomLeftCorner = (xx, yy) => {
+                    return (xx <= cornerZone) && ((px - 1 - yy) <= cornerZone);
+                };
+                for (let yy = 0; yy < px; yy++) {
+                    for (let xx = 0; xx < px; xx++) {
+                        const idx = (yy * px + xx) * 4;
+                        // keep top pixels above seam
+                        if (yy <= seamY) {
+                            odata[idx] = topImg[idx];
+                            odata[idx + 1] = topImg[idx + 1];
+                            odata[idx + 2] = topImg[idx + 2];
+                            odata[idx + 3] = topImg[idx + 3];
+                            continue;
+                        }
+                        // below seam: only replace where bottom/outside is requested
+                        let useWall = false;
+                        if (edgeBottomOutside) useWall = true;
+                        else if (cornerBROutside && isInBottomRightCorner(xx, yy)) useWall = true;
+                        else if (cornerBLOutside && isInBottomLeftCorner(xx, yy)) useWall = true;
 
-                                                if (useWall) {
-                                                    odata[idx] = wallImg[idx];
-                                                    odata[idx + 1] = wallImg[idx + 1];
-                                                    odata[idx + 2] = wallImg[idx + 2];
-                                                    odata[idx + 3] = wallImg[idx + 3];
-                                                } else {
-                                                    // use the top frame pixel when wall isn't requested
-                                                    odata[idx] = topImg[idx];
-                                                    odata[idx + 1] = topImg[idx + 1];
-                                                    odata[idx + 2] = topImg[idx + 2];
-                                                    odata[idx + 3] = topImg[idx + 3];
-                                                }
-                                            }
-                                        }
-                                    }
+                        if (useWall) {
+                            odata[idx] = wallImg[idx];
+                            odata[idx + 1] = wallImg[idx + 1];
+                            odata[idx + 2] = wallImg[idx + 2];
+                            odata[idx + 3] = wallImg[idx + 3];
+                        } else {
+                            // use the top frame pixel when wall isn't requested
+                            odata[idx] = topImg[idx];
+                            odata[idx + 1] = topImg[idx + 1];
+                            odata[idx + 2] = topImg[idx + 2];
+                            odata[idx + 3] = topImg[idx + 3];
+                        }
+                    }
+                }
+            }
         } catch (e) {
             return null;
         }
@@ -15634,11 +15652,11 @@ export class SpriteScene extends Scene {
                 const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
                 if (li === 0) {
                     const res = rawSetPixel(anim, frameIdx, x, y, color, blendType);
-                    try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                    try { scene._schedulePixelFrameInvalidation(anim, frameIdx); } catch (e) {}
                     return res;
                 }
                 const res = scene._applyPixelsToPixelLayer(anim, frameIdx, [{ x, y, color }], li);
-                try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                try { scene._schedulePixelFrameInvalidation(anim, frameIdx); } catch (e) {}
                 return res;
             };
 
@@ -15646,12 +15664,12 @@ export class SpriteScene extends Scene {
                 const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
                 if (li === 0) {
                     const res = rawModifyFrame(anim, frameIdx, changes);
-                    try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                    try { scene._schedulePixelFrameInvalidation(anim, frameIdx); } catch (e) {}
                     return res;
                 }
                 const arr = Array.isArray(changes) ? changes : [changes];
                 const res = scene._applyPixelsToPixelLayer(anim, frameIdx, arr, li);
-                try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                try { scene._schedulePixelFrameInvalidation(anim, frameIdx); } catch (e) {}
                 return res;
             };
 
@@ -15750,6 +15768,7 @@ export class SpriteScene extends Scene {
             const seedTransforms = Array.isArray(this._areaTransforms) ? this._areaTransforms : [];
             if (!Array.isArray(this._tileLayers) || this._tileLayers.length === 0) {
                 this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: seedBindings, transforms: seedTransforms }];
+                try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             }
             for (let i = 0; i < this._tileLayers.length; i++) {
                 const l = this._tileLayers[i] || {};
@@ -15872,6 +15891,13 @@ export class SpriteScene extends Scene {
         return next;
     }
 
+    _clearTileRenderCaches() {
+        try { if (this._renderOnlyEntryCache && this._renderOnlyEntryCache instanceof Map) this._renderOnlyEntryCache.clear(); } catch (e) {}
+        try { if (this._renderOnlyFrameCache && this._renderOnlyFrameCache instanceof Map) this._renderOnlyFrameCache.clear(); } catch (e) {}
+        try { if (this._compositedFrameCache && this._compositedFrameCache instanceof Map) this._compositedFrameCache.clear(); } catch (e) {}
+        try { this._renderScratchCanvases = Object.create(null); } catch (e) { this._renderScratchCanvases = null; }
+    }
+
     setActiveLayerIndex(type = 'pixel', index = 0) {
         this._ensureLayerState();
         const kind = this._normalizeLayerType(type);
@@ -15881,6 +15907,20 @@ export class SpriteScene extends Scene {
             const max = Math.max(0, this._tileLayers.length - 1);
             this._activeTileLayerIndex = Math.max(0, Math.min((index | 0), max));
             this._syncActiveTileLayerReferences();
+            // Active layer changes affect dimming/visibility — clear render caches so visuals update.
+            try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
+            try { if (this._renderOnlyEntryCache && this._renderOnlyEntryCache instanceof Map) this._renderOnlyEntryCache.clear(); } catch (e) {}
+            try { if (this._renderOnlyFrameCache && this._renderOnlyFrameCache instanceof Map) this._renderOnlyFrameCache.clear(); } catch (e) {}
+            try { if (this._compositedFrameCache && this._compositedFrameCache instanceof Map) this._compositedFrameCache.clear(); } catch (e) {}
+
+            // Conservative invalidation for area-specific caches to ensure dim state recomputes.
+            try {
+                const areas = Array.isArray(this._areaBindings) ? this._areaBindings.length : 0;
+                for (let ai = 0; ai < areas; ai++) {
+                    try { if (typeof this._invalidateTileCachesForArea === 'function') this._invalidateTileCachesForArea(ai); } catch (e) {}
+                }
+            } catch (e) {}
+
             return this._activeTileLayerIndex;
         }
         const max = Math.max(0, this._pixelLayers.length - 1);
@@ -15902,6 +15942,7 @@ export class SpriteScene extends Scene {
             this._tileLayers.push(entry);
             this._activeTileLayerIndex = this._tileLayers.length - 1;
             this._syncActiveTileLayerReferences();
+            try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             return this._activeTileLayerIndex;
         }
         const n = this._pixelLayers.length + 1;
@@ -15933,6 +15974,7 @@ export class SpriteScene extends Scene {
             this._tileLayers.splice(i, 1);
             this._activeTileLayerIndex = Math.max(0, Math.min(this._activeTileLayerIndex, this._tileLayers.length - 1));
             this._syncActiveTileLayerReferences();
+            try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             return true;
         }
         if (this._pixelLayers.length <= 1) return false;
@@ -15962,6 +16004,7 @@ export class SpriteScene extends Scene {
             else if ((this._activeTileLayerIndex | 0) === (i + 1)) this._activeTileLayerIndex = i;
 
             this._syncActiveTileLayerReferences();
+            try { if (typeof this._clearTileRenderCaches === 'function') this._clearTileRenderCaches(); } catch (e) {}
             return true;
         }
 
@@ -16081,6 +16124,30 @@ export class SpriteScene extends Scene {
                     if (frameCache.size > 256) frameCache.clear();
                 }
             } catch (e) {}
+        } catch (e) {}
+    }
+
+    _schedulePixelFrameInvalidation(anim, frameIdx) {
+        try {
+            if (!this._pixelInvalidateSet || !(this._pixelInvalidateSet instanceof Set)) this._pixelInvalidateSet = new Set();
+            const key = String(anim || '') + '::' + (Number(frameIdx) | 0);
+            this._pixelInvalidateSet.add(key);
+            if (this._pixelInvalidateScheduled) return;
+            this._pixelInvalidateScheduled = true;
+            const process = () => {
+                this._pixelInvalidateScheduled = false;
+                const pending = this._pixelInvalidateSet || new Set();
+                this._pixelInvalidateSet = new Set();
+                for (const k of pending) {
+                    try {
+                        const parts = String(k).split('::');
+                        const a = parts[0];
+                        const fi = Number(parts[1]) || 0;
+                        this._onPixelFrameModified(a, fi);
+                    } catch (e) {}
+                }
+            };
+            try { requestAnimationFrame(process); } catch (e) { setTimeout(process, 16); }
         } catch (e) {}
     }
 
@@ -16217,7 +16284,14 @@ export class SpriteScene extends Scene {
                     const sy = (this.Draw && typeof this.Draw.py === 'function') ? this.Draw.py(dstPos.y) : dstPos.y;
                     const sw = (this.Draw && typeof this.Draw.px === 'function') ? this.Draw.px(dstW) : dstW;
                     const sh = (this.Draw && typeof this.Draw.py === 'function') ? this.Draw.py(dstH) : dstH;
-                    drawCtx.fillRect(sx, sy, sw, sh);
+                    // Snap dims to integer pixel boundaries to avoid subpixel gaps between adjacent tiles.
+                    const left = Math.floor(sx + 1e-6);
+                    const top = Math.floor(sy + 1e-6);
+                    const right = Math.ceil(sx + sw - 1e-6);
+                    const bottom = Math.ceil(sy + sh - 1e-6);
+                    const wpx = Math.max(1, right - left);
+                    const hpx = Math.max(1, bottom - top);
+                    drawCtx.fillRect(left, top, wpx, hpx);
                     drawCtx.restore();
                 }
             }

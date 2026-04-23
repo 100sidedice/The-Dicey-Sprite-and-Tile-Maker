@@ -494,26 +494,33 @@ export default class SpriteSheet{
             const ctx = frame.getContext('2d');
             const img = ctx.getImageData(0,0,frame.width, frame.height);
             const data = img.data;
-
+            // cache color conversions to avoid repeated Color.convertColor calls
+            const colorCache = Object.create(null);
             const applyChange = (chg) => {
                 if (!chg) return;
                 const x = Math.floor(chg.x || 0);
                 const y = Math.floor(chg.y || 0);
                 if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;
                 const idx = (y * frame.width + x) * 4;
-                // Use centralized Color helper to convert inputs to RGB(A)
-                let rgba;
-                try {
-                    const colObj = Color.convertColor(chg.color || '#000000');
-                    const rgb = colObj.toRgb();
-                    const ra = Math.round(rgb.a || 0);
-                    const ga = Math.round(rgb.b || 0);
-                    const ba = Math.round(rgb.c || 0);
-                    const aa = Math.round((rgb.d === undefined ? 1 : rgb.d) * 255);
-                    rgba = [ra, ga, ba, aa];
-                } catch (e) {
-                    rgba = [0,0,0,0];
+
+                // Resolve color -> rgba (reuse cached conversions when possible)
+                const colorKey = (typeof chg.color === 'string') ? chg.color : JSON.stringify(chg.color || '');
+                let rgba = colorCache[colorKey];
+                if (!rgba) {
+                    try {
+                        const colObj = Color.convertColor(chg.color || '#000000');
+                        const rgb = colObj.toRgb();
+                        const ra = Math.round(rgb.a || 0);
+                        const ga = Math.round(rgb.b || 0);
+                        const ba = Math.round(rgb.c || 0);
+                        const aa = Math.round((rgb.d === undefined ? 1 : rgb.d) * 255);
+                        rgba = [ra, ga, ba, aa];
+                    } catch (e) {
+                        rgba = [0,0,0,0];
+                    }
+                    colorCache[colorKey] = rgba;
                 }
+
                 const blend = chg.blendType || 'replace';
                 if (blend === 'alpha') {
                     const srcA = rgba[3] / 255;
