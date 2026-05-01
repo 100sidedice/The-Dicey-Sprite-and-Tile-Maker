@@ -8645,61 +8645,77 @@ export class SpriteScene extends Scene {
                 const hsvDelta = baseAdjust * channelMultiplier;
                 const ratioRange = Math.max(0, Math.round(baseAdjust * 100));
                 const spliceMode = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                const brushSize = Math.max(1, Math.min(15, Number(this.brushSize || 1)));
+                const noiseScale = (brushSize <= 1) ? 1 : Math.max(2, Math.round(brushSize * 1.6));
+                const noiseSeed = Math.floor(Math.random() * 8192) + 1;
                 const clamp01 = (v) => Math.max(0, Math.min(1, v));
                 const clamp255 = (v) => Math.max(0, Math.min(255, v));
-                const randFloat = (range) => (Math.random() * 2 - 1) * range;
-                const randIntRange = (range) => Math.floor(Math.random() * (range * 2 + 1)) - range;
+                const lerp = (a, b, t) => a + (b - a) * t;
+                const fade = (t) => t * t * (3 - 2 * t);
+                const noiseSampleAt = (x, y) => {
+                    if (brushSize <= 1) return (Math.random() * 2 - 1);
+                    const gx = x / noiseScale;
+                    const gy = y / noiseScale;
+                    const x0 = Math.floor(gx);
+                    const y0 = Math.floor(gy);
+                    const x1 = x0 + 1;
+                    const y1 = y0 + 1;
+                    const sx = fade(gx - x0);
+                    const sy = fade(gy - y0);
+                    const n00 = this._noise01(x0, y0, noiseSeed);
+                    const n10 = this._noise01(x1, y0, noiseSeed);
+                    const n01 = this._noise01(x0, y1, noiseSeed);
+                    const n11 = this._noise01(x1, y1, noiseSeed);
+                    const nx0 = lerp(n00, n10, sx);
+                    const nx1 = lerp(n01, n11, sx);
+                    return (lerp(nx0, nx1, sy) * 2) - 1;
+                };
 
-                // Helper to apply noise to a pixel index using the current adjust channel/amount.
-                const applyNoiseAtIdx = (idx) => {
+                // Helper: apply a discrete channel delta to a pixel at (px,py).
+                const applyDeltaAt = (px, py, deltaSignOrVal) => {
+                    const idx = (py * w + px) * 4;
                     const r = data[idx];
                     const g = data[idx + 1];
                     const b = data[idx + 2];
                     const a = data[idx + 3];
-
                     const hex = this.rgbaToHex(r, g, b, a);
                     const col = Color.convertColor(hex);
                     const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
 
                     let nr = r, ng = g, nb = b, na = a;
 
-                    if (spliceMode && channel === 'v') {
-                        const deltaV = randIntRange(ratioRange);
-                        nr = clamp255(r + deltaV);
-                        ng = clamp255(g + deltaV);
-                        nb = clamp255(b + deltaV);
-                    } else {
-                        switch (channel) {
-                            case 'h': {
-                                hsv.a = (hsv.a + randFloat(hsvDelta)) % 1; if (hsv.a < 0) hsv.a += 1;
-                                break;
-                            }
-                            case 's': {
-                                const deltaS = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                hsv.b = clamp01(hsv.b + deltaS);
-                                break;
-                            }
-                            case 'a': {
-                                const deltaA = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                hsv.d = clamp01(hsv.d + deltaA);
-                                break;
-                            }
-                            case 'v':
-                            default: {
-                                const deltaV = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                hsv.c = clamp01(hsv.c + deltaV);
-                                break;
-                            }
+                    // deltaSignOrVal is a signed integer multiplier for discrete step,
+                    // or a fractional value when supplied directly.
+                    if (channel === 'h') {
+                        const step = hsvDelta || 0.01;
+                        const delta = (typeof deltaSignOrVal === 'number' && Math.abs(deltaSignOrVal) <= 1)
+                            ? (Math.sign(deltaSignOrVal) * step)
+                            : (Number(deltaSignOrVal) || 0);
+                        hsv.a = (hsv.a + delta) % 1; if (hsv.a < 0) hsv.a += 1;
+                    } else if (channel === 's' || channel === 'v' || channel === 'a') {
+                        if (spliceMode && Number.isInteger(deltaSignOrVal)) {
+                            const pct = (deltaSignOrVal / Math.max(1, ratioRange));
+                            if (channel === 's') hsv.b = clamp01(hsv.b + pct);
+                            if (channel === 'v') hsv.c = clamp01(hsv.c + pct);
+                            if (channel === 'a') hsv.d = clamp01(hsv.d + pct);
+                        } else {
+                            const step = hsvDelta || 0.01;
+                            const delta = (typeof deltaSignOrVal === 'number' && Math.abs(deltaSignOrVal) <= 1)
+                                ? (Math.sign(deltaSignOrVal) * step)
+                                : (Number(deltaSignOrVal) || 0);
+                            if (channel === 's') hsv.b = clamp01(hsv.b + delta);
+                            if (channel === 'v') hsv.c = clamp01(hsv.c + delta);
+                            if (channel === 'a') hsv.d = clamp01(hsv.d + delta);
                         }
+                    }
 
-                        const rgb = hsv.toRgb(); // returns Color with rgb in a,b,c
-                        nr = Math.round(rgb.a);
-                        ng = Math.round(rgb.b);
-                        nb = Math.round(rgb.c);
-                        if (channel === 'a') {
-                            const alphaComponent = rgb.d ?? hsv.d ?? 1;
-                            na = Math.round(clamp255(alphaComponent * 255));
-                        }
+                    const rgb = hsv.toRgb();
+                    nr = Math.round(rgb.a);
+                    ng = Math.round(rgb.b);
+                    nb = Math.round(rgb.c);
+                    if (channel === 'a') {
+                        const alphaComponent = rgb.d ?? hsv.d ?? 1;
+                        na = Math.round(clamp255(alphaComponent * 255));
                     }
 
                     data[idx] = nr;
@@ -8708,8 +8724,6 @@ export class SpriteScene extends Scene {
                     data[idx + 3] = na;
 
                     if (nr !== r || ng !== g || nb !== b || na !== a) {
-                        const px = (idx / 4) % w;
-                        const py = Math.floor((idx / 4) / w);
                         noiseChanges.push({ x: px, y: py, next: this.rgbaToHex(nr, ng, nb, na) });
                     }
                 };
@@ -8717,12 +8731,16 @@ export class SpriteScene extends Scene {
                 // If there is any active selection (points or region), only affect those pixels.
                 const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
                 const hasRegionSelection = !!this.selectionRegion;
+                // Build a mask of available pixels: selection crops effect; otherwise full frame.
+                const available = [];
+                const availableSet = new Set();
                 if (hasPointSelection) {
                     for (const p of this.selectionPoints) {
                         if (!p) continue;
-                        if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
-                        const idx = (p.y * w + p.x) * 4;
-                        applyNoiseAtIdx(idx);
+                        const px = p.x, py = p.y;
+                        if (px < 0 || py < 0 || px >= w || py >= h) continue;
+                        const k = `${px},${py}`;
+                        if (!availableSet.has(k)) { availableSet.add(k); available.push({ x: px, y: py }); }
                     }
                 } else if (hasRegionSelection) {
                     const sr = this.selectionRegion;
@@ -8730,17 +8748,59 @@ export class SpriteScene extends Scene {
                     const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
                     const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
                     const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
-                    for (let yy = minX ? minY : minY; yy <= maxY; yy++) {
-                        for (let xx = minX; xx <= maxX; xx++) {
-                            const idx = (yy * w + xx) * 4;
-                            applyNoiseAtIdx(idx);
+                    for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) {
+                        const k = `${xx},${yy}`; availableSet.add(k); available.push({ x: xx, y: yy });
+                    }
+                } else {
+                    for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) { const k = `${xx},${yy}`; availableSet.add(k); available.push({ x: xx, y: yy }); }
+                }
+
+                // Helper to pick unique random samples from an array.
+                const pickRandom = (arr, count) => {
+                    if (!arr || arr.length === 0 || count <= 0) return [];
+                    const pool = arr.slice();
+                    for (let i = pool.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        const tmp = pool[i];
+                        pool[i] = pool[j];
+                        pool[j] = tmp;
+                    }
+                    return pool.slice(0, Math.min(count, pool.length));
+                };
+
+                // For brushSize 1: apply discrete ±step to every available pixel (selection crops), or sample a fraction when no selection.
+                if (brushSize <= 1) {
+                    if (hasPointSelection || hasRegionSelection) {
+                        for (const p of available) {
+                            const sign = (this._noise01(p.x, p.y, noiseSeed) >= 0.5) ? 1 : -1;
+                            applyDeltaAt(p.x, p.y, sign);
+                        }
+                    } else {
+                        const prob = 0.18;
+                        for (const p of available) if (Math.random() < prob) {
+                            const sign = (this._noise01(p.x, p.y, noiseSeed) >= 0.5) ? 1 : -1;
+                            applyDeltaAt(p.x, p.y, sign);
                         }
                     }
                 } else {
-                    // No selection -> apply full-frame subtle noise: affect a fraction of pixels
-                    const prob = 0.18; // ~18% of pixels
-                    for (let p = 0; p < w * h; p++) {
-                        if (Math.random() < prob) applyNoiseAtIdx(p * 4);
+                    // brushSize > 1: scatter random seed points across the available area (selection crops sampling to available)
+                    const areaCount = available.length;
+                    const brushArea = Math.max(1, brushSize * brushSize);
+                    const seedCount = Math.max(1, Math.floor(areaCount / brushArea));
+                    const seeds = pickRandom(available, seedCount);
+                    const marked = new Set();
+                    for (const s of seeds) {
+                        if (!s) continue;
+                        const expanded = this._expandPixelsWithBrush([s], brushSize);
+                        // compute sign per-seed to keep regions coherent
+                        const n = this._noise01(s.x, s.y, noiseSeed);
+                        const sign = (n >= 0.5) ? 1 : -1;
+                        for (const e of expanded) {
+                            const k = `${e.x},${e.y}`;
+                            if (!availableSet.has(k)) continue; // crop to selection if present
+                            if (marked.has(k)) continue; marked.add(k);
+                            applyDeltaAt(e.x, e.y, sign);
+                        }
                     }
                 }
 
@@ -17035,29 +17095,6 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            // Draw active region selection (created when two points + 'b' pressed)
-            if (this.selectionRegion) {
-                try {
-                    const sr = this.selectionRegion;
-                    const regionArea = (typeof sr.areaIndex === 'number') ? sr.areaIndex : null;
-                    const shouldRenderRegionHere = !(this.tilemode && regionArea !== null && typeof areaIndex === 'number' && regionArea !== areaIndex);
-                    if (shouldRenderRegionHere) {
-                        const minX = Math.min(sr.start.x, sr.end.x);
-                        const minY = Math.min(sr.start.y, sr.end.y);
-                        const maxX = Math.max(sr.start.x, sr.end.x);
-                        const maxY = Math.max(sr.start.y, sr.end.y);
-                        const rectX = dstPos.x + minX * cellW;
-                        const rectY = dstPos.y + minY * cellH;
-                        const rectW = (maxX - minX + 1) * cellW;
-                        const rectH = (maxY - minY + 1) * cellH;
-                        // translucent fill + outline for selection region
-                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF0055', true);
-                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF00AA', false, true, scaleOutline(2), '#00FF00AA');
-                    }
-                } catch (e) {
-                    // ignore region-draw errors
-                }
-            }
 
             // Draw clipboard preview (Alt+C) aligned so clipboard origin matches mouse pixel
             if (this.clipboardPreview && this.clipboard && (!this._activeClipboardType || this._activeClipboardType === 'pixel')) {
@@ -17206,10 +17243,26 @@ export class SpriteScene extends Scene {
             if (mousePixelPos) {
                 // Color tokens: default white, switch to yellow when pixel-perfect pen enabled
                 const useYellow = (!this.tilemode && this.pixelPerfect) || (this.tilemode && this.autotile);
-                const previewLineColor = useYellow ? '#FFFF0088' : '#FFFFFF88';
-                const previewFillColor = useYellow ? '#FFFF0044' : '#FFFFFF44';
-                const cursorFillColor = useYellow ? '#FFFF0022' : '#FFFFFF22';
-                const cursorOutlineColor = useYellow ? '#FFFF00EE' : '#FFFFFFEE';
+                
+                // Determine if we should use black cursor on white/light pixels
+                let useBlackCursor = false;
+                if (!renderOnly) { // pixel cursor not in renderonly mode
+                    const sheet = this.currentSprite;
+                    const frameCanvas = sheet.getFrame(effAnim, effFrame);
+                    if (frameCanvas) {
+                        const ctx = frameCanvas.getContext('2d');
+                        const pixelData = ctx.getImageData(mousePixelPos.x, mousePixelPos.y, 1, 1).data;
+                        // Check if pixel is white or close to white (R, G, B all >= 200)
+                        if (pixelData[0] >= 200 && pixelData[1] >= 200 && pixelData[2] >= 200) {
+                            useBlackCursor = true;
+                        }
+                    }
+                }
+                
+                const previewLineColor = useYellow ? '#FFFF0088' : (useBlackCursor ? '#00000088' : '#FFFFFF88');
+                const previewFillColor = useYellow ? '#FFFF0044' : (useBlackCursor ? '#00000044' : '#FFFFFF44');
+                const cursorFillColor = useYellow ? '#FFFF0022' : (useBlackCursor ? '#00000022' : '#FFFFFF22');
+                const cursorOutlineColor = useYellow ? '#FFFF00EE' : (useBlackCursor ? '#000000EE' : '#FFFFFFEE');
 
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
                     this.drawLine(anchor, mousePixelPos, previewLineColor, dstPos, cellW, cellH);
