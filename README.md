@@ -1,5 +1,5 @@
 *Note: This web app is designed for chromebooks & laptop touchpads*
-#### Game URL: https://eligamer5678.github.io/The-Dicey-Sprite-and-Tile-Maker/
+#### Game URL: https://100sidedicegithub.io/The-Dicey-Sprite-and-Tile-Maker/
 
 ### Welcome to the Dicey pixel art maker!
 - This is a web based powerful pixel art tool, designed to speed up asset creation for games, or just have a bit of fun with. 
