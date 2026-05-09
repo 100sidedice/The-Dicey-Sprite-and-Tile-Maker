@@ -257,7 +257,7 @@ export class SpriteScene extends Scene {
                                 const n = Math.floor(Number(v));
                                 return Number.isFinite(n) && n > 0 ? n : fallback;
                             };
-                            const cols = parseDim(layout.tileCols, (this.tileCols|0) || 3);
+                            const cols = parseDim(layout.tileCols, (this.tileCols|0) || 1);
                             const rows = parseDim(layout.tileRows, (this.tileRows|0) || cols);
                             const nextCols = Math.max(1, cols);
                             const nextRows = Math.max(1, rows);
@@ -281,7 +281,7 @@ export class SpriteScene extends Scene {
                                     if (Number.isFinite(c) && Number.isFinite(r)) this._activateTile(c, r);
                                 }
                             } else {
-                                this._seedTileActives(cols, rows);
+                                this._activateTile(0, 0);
                             }
 
                             const decodeBindingIndex = (entry) => {
@@ -2144,8 +2144,8 @@ export class SpriteScene extends Scene {
 
             const payload = {
                 enabled: !!this.tilemode,
-                cols: Number(this.tileCols || 3),
-                rows: Number(this.tileRows || 3),
+                cols: Number(this.tileCols || 1),
+                rows: Number(this.tileRows || 1),
                 activeTileLayerIndex: Math.max(0, Number(this._activeTileLayerIndex) | 0),
                 activeTiles,
                 bindings,
@@ -2219,8 +2219,8 @@ export class SpriteScene extends Scene {
     _applyTilemapState(tilemapState) {
         try {
             if (!tilemapState || typeof tilemapState !== 'object') return false;
-            const cols = Math.max(1, Math.floor(Number(tilemapState.cols || this.tileCols || 3)));
-            const rows = Math.max(1, Math.floor(Number(tilemapState.rows || this.tileRows || 3)));
+            const cols = Math.max(1, Math.floor(Number(tilemapState.cols || this.tileCols || 1)));
+            const rows = Math.max(1, Math.floor(Number(tilemapState.rows || this.tileRows || 1)));
 
             if (this.stateController) {
                 this.stateController.setTileGrid(cols, rows);
@@ -2243,15 +2243,7 @@ export class SpriteScene extends Scene {
                     this._activateTile(p.col, p.row, false);
                 }
             } else {
-                const midC = Math.floor(cols / 2);
-                const midR = Math.floor(rows / 2);
-                for (let row = 0; row < rows; row++) {
-                    for (let col = 0; col < cols; col++) {
-                        const tc = col - midC;
-                        const tr = row - midR;
-                        this._activateTile(tc, tr, false);
-                    }
-                }
+                this._activateTile(0, 0, false);
             }
 
             this._areaBindings = [];
@@ -3925,11 +3917,11 @@ export class SpriteScene extends Scene {
                 }
             } else {
                 try {
-                    const defCols = Math.max(1, (this.tileCols|0) || 3);
+                    const defCols = Math.max(1, (this.tileCols|0) || 1);
                     const defRows = Math.max(1, (this.tileRows|0) || defCols);
                     const defStr = defCols === defRows ? String(defRows) : (defRows + 'x' + defCols);
                     try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                    const input = window.prompt('Grid size (default "3x3")', defStr);
+                    const input = window.prompt('Grid size (default "1x1")', defStr);
                     if (input != null) {
                         const raw = String(input).trim().toLowerCase();
                         if (raw.length > 0) {
@@ -3951,7 +3943,7 @@ export class SpriteScene extends Scene {
                                 this.tileCols = nextCols;
                                 this.tilemode = true;
                             }
-                            this._seedTileActives(this.tileCols, this.tileRows);
+                            if (!this._tileActive || this._tileActive.size === 0) this._activateTile(0, 0);
                         }
                     }
                 } catch (e) { /* ignore prompt / parse errors */ }
@@ -4039,55 +4031,29 @@ export class SpriteScene extends Scene {
                 console.warn('zoom integration failed', e);
             }
 
-                // bind key: press 'y' to bind a single selected frame to the area under mouse
+                // press 'y' to place/update a special sprite proxy that always mirrors
+                // the currently selected animation/frame (instead of tile binding behavior)
                 try {
                     if (this.keys && typeof this.keys.released === 'function' && this.keys.released('y')) {
-                        // area binding / mirror-to-map is a tilemode-only action
+                        // sprite proxy placement is a tilemode-only action
                         if (!this.tilemode) {
                             // ignore in non-tilemode
                         } else {
                             const pos = this.getPos(this.mouse && this.mouse.pos);
-                            if (pos && (pos.inside || pos.renderOnly) && typeof pos.areaIndex === 'number') {
-                                // determine which frame to bind: prefer primary selection, but capture any layered stack for preview reuse
-                                let frameIdx = this.selectedFrame;
-                                let anim = this.selectedAnimation;
-                                let stack = [];
-                                const pushFrame = (v) => {
-                                    if (!Number.isFinite(v)) return;
-                                    const n = Number(v);
-                                    if (!stack.includes(n)) stack.push(n);
-                                };
-                                try {
-                                    pushFrame(frameIdx);
-                                    const fs = this.FrameSelect;
-                                    if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
-                                        const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
-                                        for (const i of arr) pushFrame(i);
-                                    }
-                                    // Normalize: sort, dedupe, and discard single-frame stacks so toggle works with legacy bindings
-                                    stack = Array.from(new Set(stack)).sort((a,b)=>a-b);
-                                    if (stack.length <= 1) stack = [];
-                                } catch (e) { /* ignore stack build errors */ }
-                                // Toggle behavior: if area already bound to same anim/frame, clear it
-                                const existing = (Array.isArray(this._areaBindings) && this._areaBindings[pos.areaIndex]) ? this._areaBindings[pos.areaIndex] : null;
-                                const sameStack = (() => {
-                                    if (!existing) return false;
-                                    const existingStack = Array.isArray(existing.multiFrames) ? existing.multiFrames : [];
-                                    if (existingStack.length !== stack.length) return false;
-                                    if (existingStack.length === 0 && stack.length === 0) return true;
-                                    for (let i = 0; i < stack.length; i++) if (Number(existingStack[i]) !== Number(stack[i])) return false;
-                                    return true;
-                                })();
-                                if (existing && existing.anim === anim && Number(existing.index) === Number(frameIdx) && sameStack) {
-                                    this.clearAreaBinding(pos.areaIndex);
-                                } else {
-                                    const savedStack = stack.length >= 2 ? stack : null;
-                                    this.bindArea(pos.areaIndex, anim, frameIdx, savedStack);
+                            if (pos && (pos.inside || pos.renderOnly)
+                                && Number.isFinite(Number(pos.tileCol))
+                                && Number.isFinite(Number(pos.tileRow))) {
+                                const col = Number(pos.tileCol) | 0;
+                                const row = Number(pos.tileRow) | 0;
+                                const proxy = this._upsertSelectedFrameProxySprite(col, row, true);
+                                if (proxy && proxy.id) {
+                                    this.selectedSpriteEntityId = proxy.id;
+                                    try { this.modifyState(proxy.id, false, false, ['spriteLayer', 'selectedEntityId']); } catch (e) {}
                                 }
                             }
                         }
                     }
-                } catch (e) { console.warn('area bind key failed', e); }
+                } catch (e) { console.warn('selected-frame proxy key failed', e); }
 
                     // Rotate / Flip preview and commit handlers for area under mouse
                     try {
@@ -14048,7 +14014,7 @@ export class SpriteScene extends Scene {
 
     _normalizeWaypointKeyList(rawList) {
         try {
-            if (!Array.isArray(rawList)) return [];
+            if (!Array.isArray(rawList)) rawList = [];
             const out = [];
             const seen = new Set();
             for (const entry of rawList) {
@@ -14064,6 +14030,9 @@ export class SpriteScene extends Scene {
                 seen.add(key);
                 out.push(key);
             }
+            // Keep a dedicated navigation/teleport waypoint anchored at tile origin.
+            const originKey = this._tileKey(0, 0);
+            if (!seen.has(originKey)) out.unshift(originKey);
             return out;
         } catch (e) {
             return [];
@@ -14131,6 +14100,8 @@ export class SpriteScene extends Scene {
 
     _removeWaypointAtTile(col, row, syncOp = true) {
         try {
+            // Origin waypoint is reserved and always present.
+            if ((Number(col) | 0) === 0 && (Number(row) | 0) === 0) return false;
             const key = this._tileKey(col, row);
             const keys = this._getWaypointKeys();
             const idx = keys.indexOf(key);
@@ -14679,6 +14650,70 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _getSelectedFrameProxySpriteId() {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return null;
+            const entities = layer.entities || {};
+            const order = Array.isArray(layer.order) ? layer.order : Object.keys(entities || {});
+            for (const id of order) {
+                const ent = entities[id];
+                if (!ent) continue;
+                if (ent.__selectedFrameProxy === true) return String(id);
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _upsertSelectedFrameProxySprite(col, row, syncOp = true) {
+        try {
+            const layer = this._normalizeSpriteLayerState();
+            if (!layer) return null;
+            const id = this._getSelectedFrameProxySpriteId();
+            const fallbackAnim = String(this.selectedAnimation || 'idle');
+            if (id && layer.entities && layer.entities[id]) {
+                const patch = {
+                    col: Number(col) | 0,
+                    row: Number(row) | 0,
+                    __selectedFrameProxy: true,
+                    anim: fallbackAnim
+                };
+                this._updateSpriteEntity(id, patch, syncOp);
+                return layer.entities[id] || null;
+            }
+            const created = this._addSpriteEntityAt(col, row, fallbackAnim, syncOp);
+            if (!created || !created.id) return created;
+            this._updateSpriteEntity(created.id, { __selectedFrameProxy: true, anim: fallbackAnim }, syncOp);
+            return (layer.entities && layer.entities[created.id]) ? layer.entities[created.id] : created;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getFirstAnimationFallbackBinding() {
+        try {
+            const sheet = this.currentSprite;
+            if (sheet && sheet._frames && typeof sheet._frames.keys === 'function') {
+                const names = Array.from(sheet._frames.keys()).filter((name) => {
+                    const k = String(name || '').trim();
+                    if (!k) return false;
+                    const arr = sheet._frames.get(k) || [];
+                    return Array.isArray(arr) && arr.length > 0;
+                });
+                if (names.length > 0) {
+                    return { anim: String(names[0]), index: 0, multiFrames: null };
+                }
+            }
+        } catch (e) {}
+        return {
+            anim: this.selectedAnimation,
+            index: Number(this.selectedFrame) || 0,
+            multiFrames: null
+        };
+    }
+
     _updateSpriteEntity(id, patch = {}, syncOp = true) {
         try {
             const entities = this._getSpriteEntities();
@@ -15009,6 +15044,26 @@ export class SpriteScene extends Scene {
             const hoverCol = hoverCoord ? (hoverCoord.col | 0) : null;
             const hoverRow = hoverCoord ? (hoverCoord.row | 0) : null;
 
+            // Origin waypoint marker in render-only mode (behind all tile layers).
+            if (0 >= minCol && 0 <= maxCol && 0 >= minRow && 0 <= maxRow) {
+                const ox0 = (bx + 0 * sx) * scaleX;
+                const oy0 = (by + 0 * sy) * scaleY;
+                const ow = sx * scaleX;
+                const oh = sy * scaleY;
+                const mW = Math.max(2, ow * 0.34);
+                const mH = Math.max(2, oh * 0.34);
+                const mx = ox0 + (ow - mW) * 0.5;
+                const my = oy0 + (oh - mH) * 0.5;
+                ctx.save();
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = '#FFFFFF26';
+                ctx.fillRect(mx, my, mW, mH);
+                ctx.strokeStyle = '#808080B0';
+                ctx.lineWidth = Math.max(1, Math.round(Math.min(ow, oh) * 0.02));
+                ctx.strokeRect(mx + 0.5, my + 0.5, Math.max(1, mW - 1), Math.max(1, mH - 1));
+                ctx.restore();
+            }
+
             if (iterateVisibleWindow) {
                 for (let row = minRow; row <= maxRow; row++) {
                     for (let col = minCol; col <= maxCol; col++) {
@@ -15139,66 +15194,33 @@ export class SpriteScene extends Scene {
             const base = document.createElement('canvas');
             base.width = ts * 2;
             base.height = ts * 2;
-            const tctx = topFrame.getContext('2d');
-            const wctx = wallFrame.getContext('2d');
-            const topImg = tctx.getImageData(0, 0, px, px).data;
-            const wallImg = wctx.getImageData(0, 0, px, px).data;
-            const odata = outImage.data;
-            const seamY = Math.max(0, bottomBoundary);
-            // Determine which connection bits indicate bottom/outside
-            const edgeBottomOutside = !!bits[2];
-            const cornerBROutside = !!bits[6];
-            const cornerBLOutside = !!bits[7];
-            // Only trigger wall compositing when the bottom edge is outside.
-            // Ignore corner-only outside signals so left/right edges forcing
-            // corner bits don't cause bottom compositing.
-            const needWall = edgeBottomOutside;
-            try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
-            if (!needWall) {
-                // copy top frame entirely
-                outImage.data.set(topImg);
-            } else {
-                // corner sizing - match later outline corner math
-                const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
-                const cornerZone = Math.max(1, Math.floor(cornerRadiusLocal));
-                const isInBottomRightCorner = (xx, yy) => {
-                    return ((px - 1 - xx) <= cornerZone) && ((px - 1 - yy) <= cornerZone);
-                };
-                const isInBottomLeftCorner = (xx, yy) => {
-                    return (xx <= cornerZone) && ((px - 1 - yy) <= cornerZone);
-                };
-                for (let yy = 0; yy < px; yy++) {
-                    for (let xx = 0; xx < px; xx++) {
-                        const idx = (yy * px + xx) * 4;
-                        // keep top pixels above seam
-                        if (yy <= seamY) {
-                            odata[idx] = topImg[idx];
-                            odata[idx + 1] = topImg[idx + 1];
-                            odata[idx + 2] = topImg[idx + 2];
-                            odata[idx + 3] = topImg[idx + 3];
-                            continue;
-                        }
-                        // below seam: only replace where bottom/outside is requested
-                        let useWall = false;
-                        if (edgeBottomOutside) useWall = true;
-                        else if (cornerBROutside && isInBottomRightCorner(xx, yy)) useWall = true;
-                        else if (cornerBLOutside && isInBottomLeftCorner(xx, yy)) useWall = true;
+            const ctx = base.getContext('2d');
+            if (!ctx) return null;
 
-                        if (useWall) {
-                            odata[idx] = wallImg[idx];
-                            odata[idx + 1] = wallImg[idx + 1];
-                            odata[idx + 2] = wallImg[idx + 2];
-                            odata[idx + 3] = wallImg[idx + 3];
-                        } else {
-                            // use the top frame pixel when wall isn't requested
-                            odata[idx] = topImg[idx];
-                            odata[idx + 1] = topImg[idx + 1];
-                            odata[idx + 2] = topImg[idx + 2];
-                            odata[idx + 3] = topImg[idx + 3];
-                        }
-                    }
-                }
+            // Draw checkerboard pattern
+            ctx.fillStyle = light;
+            ctx.fillRect(0, 0, ts * 2, ts * 2);
+            ctx.fillStyle = dark;
+            // Top-left and bottom-right dark squares
+            ctx.fillRect(0, 0, ts, ts);
+            ctx.fillRect(ts, ts, ts, ts);
+
+            // Create large checkerboard by tiling the 2x2 pattern
+            const tiledCanvas = document.createElement('canvas');
+            tiledCanvas.width = w;
+            tiledCanvas.height = h;
+            const tctx = tiledCanvas.getContext('2d');
+            if (!tctx) return null;
+
+            const patt = tctx.createPattern(base, 'repeat');
+            if (patt) {
+                tctx.fillStyle = patt;
+                tctx.fillRect(0, 0, w, h);
             }
+
+            if (!this._checkerboardCache) this._checkerboardCache = new Map();
+            this._checkerboardCache.set(key, tiledCanvas);
+            return tiledCanvas;
         } catch (e) {
             return null;
         }
@@ -16094,11 +16116,12 @@ export class SpriteScene extends Scene {
             const active = Math.max(0, Math.min((this._activeTileLayerIndex | 0), this._tileLayers.length - 1));
             const hasValidBinding = (b) => !!(b && b.anim !== undefined && b.index !== undefined);
             const layerVisibility = (layer) => this._normalizeTileLayerVisibility(layer && layer.visibility, 0);
-            let anyBound = false;
+            const anyBoundAnyLayer = !!(typeof this._hasAnyTileLayerBindingAtIndex === 'function' && this._hasAnyTileLayerBindingAtIndex(idx));
+            let anyVisibleBound = false;
             for (let i = 0; i < this._tileLayers.length; i++) {
                 const l = this._tileLayers[i];
                 if (layerVisibility(l) === 2) continue;
-                if (l && Array.isArray(l.bindings) && hasValidBinding(l.bindings[idx])) { anyBound = true; break; }
+                if (l && Array.isArray(l.bindings) && hasValidBinding(l.bindings[idx])) { anyVisibleBound = true; break; }
             }
 
             const buildVisual = (layerIndex) => {
@@ -16108,6 +16131,7 @@ export class SpriteScene extends Scene {
                 }
                 const v = layerVisibility(this._tileLayers[layerIndex]);
                 if (v === 1) return { alpha: 1, darken: 0 }; // full visible
+                if (v === 2) return { alpha: 0, darken: 0 }; // hidden
                 const rel = layerIndex - active;
                 // Exaggerated separation:
                 // - Layers above active are very faint.
@@ -16118,13 +16142,16 @@ export class SpriteScene extends Scene {
             };
 
             const out = [];
-            if (!anyBound) {
+            if (!anyVisibleBound) {
+                // If bindings exist only on hidden layers, render nothing.
+                if (anyBoundAnyLayer) return [];
                 const activeLayer = this._tileLayers[active] || { transforms: [] };
                 if (layerVisibility(activeLayer) === 2) return [];
                 const t = Array.isArray(activeLayer.transforms) ? (activeLayer.transforms[idx] || null) : null;
+                const fallback = this._getFirstAnimationFallbackBinding();
                 out.push({
                     layerIndex: active,
-                    binding: { anim: this.selectedAnimation, index: this.selectedFrame, multiFrames: null },
+                    binding: fallback,
                     transform: t,
                     ...buildVisual(active)
                 });
@@ -16615,7 +16642,6 @@ export class SpriteScene extends Scene {
                 if (!this._shouldCullArea(info)) areas.push(info);
             }
         } else {
-            if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
             const seen = new Set();
             visible = this._getVisibleTileBounds(basePos, size, 1);
             this._lastVisibleTileBounds = visible;
@@ -16826,6 +16852,10 @@ export class SpriteScene extends Scene {
                 // determine effective animation/frame for this area (respect bindings only in tilemode)
                 const binding = (this.tilemode && typeof areaIndex === 'number') ? this.getAreaBinding(areaIndex) : null;
                 const coordForArea = (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) ? this._tileIndexToCoord[areaIndex] : null;
+                // Dedicated origin waypoint marker drawn behind all tile layers.
+                if (this.tilemode && modeBase && coordForArea && (coordForArea.col | 0) === 0 && (coordForArea.row | 0) === 0) {
+                    this._drawOriginWaypointMarkerBehindLayers(pos, size);
+                }
                 const tileIsActive = (!this.tilemode) || (coordForArea && this._isTileActive(coordForArea.col, coordForArea.row));
                 if (this.tilemode && !tileIsActive) {
                     if (modeBase) {
@@ -17384,12 +17414,17 @@ export class SpriteScene extends Scene {
                 if (visible && (col < visible.minCol || col > visible.maxCol || row < visible.minRow || row > visible.maxRow)) continue;
                 const pos = this._tileCoordToPos(col, row, basePos, tileSize);
 
-                const anim = ent.anim || this.selectedAnimation;
-                const runtime = (this._spriteAnimRuntime && this._spriteAnimRuntime.get(String(anim))) ? this._spriteAnimRuntime.get(String(anim)) : null;
-                const frameCount = this._getAnimationLogicalFrameCount(anim);
+                const isSelectedFrameProxy = !!ent.__selectedFrameProxy;
+                const anim = isSelectedFrameProxy ? (this.selectedAnimation || ent.anim) : (ent.anim || this.selectedAnimation);
                 let frameIndex = 0;
-                if (runtime && runtime.anim === anim) {
-                    frameIndex = Math.max(0, Math.min(frameCount - 1, Number(runtime.frame) || 0));
+                if (isSelectedFrameProxy) {
+                    frameIndex = Math.max(0, Number(this.selectedFrame) || 0);
+                } else {
+                    const runtime = (this._spriteAnimRuntime && this._spriteAnimRuntime.get(String(anim))) ? this._spriteAnimRuntime.get(String(anim)) : null;
+                    const frameCount = this._getAnimationLogicalFrameCount(anim);
+                    if (runtime && runtime.anim === anim) {
+                        frameIndex = Math.max(0, Math.min(frameCount - 1, Number(runtime.frame) || 0));
+                    }
                 }
                 const frameCanvas = (typeof this.currentSprite.getFrame === 'function')
                     ? this.currentSprite.getFrame(anim, frameIndex)
@@ -17405,6 +17440,21 @@ export class SpriteScene extends Scene {
                 }
             }
         } catch (e) { /* ignore sprite entity draw errors */ }
+    }
+
+    _drawOriginWaypointMarkerBehindLayers(pos, size) {
+        try {
+            if (!pos || !size || !this.Draw) return;
+            const markerSize = new Vector(Math.max(5, size.x * 0.34), Math.max(5, size.y * 0.34));
+            const markerPos = new Vector(
+                pos.x + (size.x - markerSize.x) * 0.5,
+                pos.y + (size.y - markerSize.y) * 0.5
+            );
+            // Less intrusive origin marker: low alpha white fill + gray outline.
+            this.Draw.rect(markerPos, markerSize, '#FFFFFF26', true);
+            const strokeW = Math.max(1, Math.round(Math.min(size.x, size.y) * 0.02));
+            this.Draw.rect(markerPos, markerSize, null, false, true, strokeW, '#808080B0');
+        } catch (e) { /* ignore */ }
     }
 
     // Draw the tile cursor, selection outlines, and paste preview once per frame.
@@ -17475,11 +17525,13 @@ export class SpriteScene extends Scene {
                 const waypoints = this._getWaypointCoords(false);
                 if (waypoints.length > 0) {
                     const bounds = this._getVisibleTileBounds(basePos, tileSize, 1);
-                    const markerFill = '#00E5FF88';
-                    const markerStroke = '#00E5FFFF';
                     const markerStrokeW = Math.max(1, Math.round(Math.min(tileSize.x, tileSize.y) * 0.02));
                     for (const wp of waypoints) {
                         if (wp.col < bounds.minCol || wp.col > bounds.maxCol || wp.row < bounds.minRow || wp.row > bounds.maxRow) continue;
+                        const isOrigin = ((wp.col | 0) === 0 && (wp.row | 0) === 0);
+                        if (isOrigin) continue; // origin marker is drawn behind layers in base pass
+                        const markerFill = isOrigin ? '#FFFFFFFF' : '#00E5FF88';
+                        const markerStroke = isOrigin ? '#FFFFFFFF' : '#00E5FFFF';
                         const topLeft = this._tileCoordToPos(wp.col, wp.row, basePos, tileSize);
                         const center = new Vector(topLeft.x + tileSize.x * 0.5, topLeft.y + tileSize.y * 0.5);
                         const markerSize = new Vector(Math.max(5, tileSize.x * 0.34), Math.max(5, tileSize.y * 0.34));
