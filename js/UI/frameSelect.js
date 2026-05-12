@@ -2972,14 +2972,15 @@ export default class FrameSelect {
                     if (typeof window.GIF === 'function') {
                         console.log('[export] gif.js available, starting encoding');
                         const slice = (this.sprite && this.sprite.slicePx) ? (this.sprite.slicePx | 0) : Math.max(1, (encodeCanvas.height | 0));
-                        const frameCount = Math.max(1, Math.floor((encodeCanvas.width | 0) / slice));
+                        const gifSlice = Math.max(1, Math.round(slice * Math.max(1, upscaleMultiplier || 1)));
+                        const frameCount = Math.max(1, Math.floor((encodeCanvas.width | 0) / gifSlice));
                         const frames = [];
                         for (let i = 0; i < frameCount; i++) {
                             const c = document.createElement('canvas');
-                            c.width = slice; c.height = slice;
+                            c.width = gifSlice; c.height = gifSlice;
                             const cx = c.getContext('2d');
                             try { cx.imageSmoothingEnabled = false; } catch (e) {}
-                            try { cx.drawImage(encodeCanvas, i * slice, 0, slice, slice, 0, 0, slice, slice); } catch (e) {}
+                            try { cx.drawImage(encodeCanvas, i * gifSlice, 0, gifSlice, gifSlice, 0, 0, gifSlice, gifSlice); } catch (e) {}
                             frames.push(c);
                         }
                         // Attempt to fetch the worker script and create a same-origin blob URL
@@ -3002,7 +3003,7 @@ export default class FrameSelect {
                             }
                         } catch (e) { /* ignore */ }
 
-                        const gif = new window.GIF({ workers: 2, quality: 10, workerScript: workerScriptToUse });
+                        const gif = new window.GIF({ workers: 2, quality: 10, workerScript: workerScriptToUse, width: gifSlice, height: gifSlice });
                         for (const f of frames) gif.addFrame(f, { delay });
                         blob = await new Promise((res, rej) => {
                             let finished = false;
