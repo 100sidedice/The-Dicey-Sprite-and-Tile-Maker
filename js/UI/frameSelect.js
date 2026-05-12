@@ -2939,10 +2939,93 @@ export default class FrameSelect {
                 encodeCanvas = up;
             }
 
-            let blob = await canvasToBlobByFormat(encodeCanvas, exportFormat);
-            if (!blob && exportFormat === 'gif') {
-                alert('GIF encoding is not supported in this browser. Please use PNG or JPEG.');
-                return;
+            let blob = null;
+            if (exportFormat === 'gif') {
+                try {
+                    console.log('[export] GIF export requested');
+                    const workerScriptUrl = 'https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js';
+                    let animFps = 8;
+                    try {
+                        const profiles = (this.scene && this.scene.spriteLayer && this.scene.spriteLayer.animationProfiles) ? this.scene.spriteLayer.animationProfiles : null;
+                        if (gifAnimationName && profiles && profiles[gifAnimationName] && Number.isFinite(Number(profiles[gifAnimationName].fps))) animFps = Number(profiles[gifAnimationName].fps);
+                        else if (this.sprite && this.sprite.fps && Number.isFinite(Number(this.sprite.fps))) animFps = Number(this.sprite.fps);
+                    } catch (e) {}
+                    const delay = Math.max(1, Math.floor(1000 / (animFps || 8)));
+
+                    // Ensure gif.js is available (index.html includes a CDN script, but load dynamically if not).
+                    if (typeof window.GIF !== 'function') {
+                        try {
+                            console.log('[export] dynamic-loading gif.js');
+                            await new Promise((res, rej) => {
+                                const s = document.createElement('script');
+                                s.src = 'https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js';
+                                s.onload = res; s.onerror = rej;
+                                document.head.appendChild(s);
+                            });
+                            // small pause to ensure registration
+                            await new Promise(r => setTimeout(r, 150));
+                        } catch (e) {
+                            console.warn && console.warn('[export] failed to load gif.js dynamically', e);
+                        }
+                    }
+
+                    if (typeof window.GIF === 'function') {
+                        console.log('[export] gif.js available, starting encoding');
+                        const slice = (this.sprite && this.sprite.slicePx) ? (this.sprite.slicePx | 0) : Math.max(1, (encodeCanvas.height | 0));
+                        const frameCount = Math.max(1, Math.floor((encodeCanvas.width | 0) / slice));
+                        const frames = [];
+                        for (let i = 0; i < frameCount; i++) {
+                            const c = document.createElement('canvas');
+                            c.width = slice; c.height = slice;
+                            const cx = c.getContext('2d');
+                            try { cx.imageSmoothingEnabled = false; } catch (e) {}
+                            try { cx.drawImage(encodeCanvas, i * slice, 0, slice, slice, 0, 0, slice, slice); } catch (e) {}
+                            frames.push(c);
+                        }
+                        // Attempt to fetch the worker script and create a same-origin blob URL
+                        let workerScriptToUse = workerScriptUrl;
+                        let workerBlobUrl = null;
+                        try {
+                            try {
+                                const resp = await fetch(workerScriptUrl);
+                                if (resp && resp.ok) {
+                                    const txt = await resp.text();
+                                    const blob = new Blob([txt], { type: 'application/javascript' });
+                                    workerBlobUrl = URL.createObjectURL(blob);
+                                    workerScriptToUse = workerBlobUrl;
+                                    console.log('[export] fetched gif.worker.js and created blob URL');
+                                } else {
+                                    console.log('[export] failed to fetch gif.worker.js', resp && resp.status);
+                                }
+                            } catch (e) {
+                                console.warn('[export] error fetching gif.worker.js', e);
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        const gif = new window.GIF({ workers: 2, quality: 10, workerScript: workerScriptToUse });
+                        for (const f of frames) gif.addFrame(f, { delay });
+                        blob = await new Promise((res, rej) => {
+                            let finished = false;
+                            gif.on('finished', (b) => { finished = true; res(b); });
+                            gif.on('abort', () => { finished = true; rej(new Error('GIF encoding aborted')); });
+                            try {
+                                gif.render();
+                            } catch (err) {
+                                if (!finished) rej(err);
+                            }
+                        }).catch((err) => { throw err; });
+                        console.log('[export] gif.js finished, blob size=', blob && blob.size);
+                        // cleanup blob URL if created
+                        try { if (workerBlobUrl) { URL.revokeObjectURL(workerBlobUrl); workerBlobUrl = null; } } catch (e) {}
+                    }
+                } catch (e) { console.warn('GIF encoding failed', e); }
+            }
+            if (!blob) {
+                blob = await canvasToBlobByFormat(encodeCanvas, exportFormat);
+                if (!blob && exportFormat === 'gif') {
+                    alert('GIF encoding is not supported in this browser. Please use PNG or JPEG.');
+                    return;
+                }
             }
             if (!blob) {
                 const c = document.createElement('canvas');
