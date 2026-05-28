@@ -117,8 +117,17 @@ export class SpriteScene extends Scene {
             colorInput.title = 'Pen color';
             colorInput.addEventListener('input', (e) => {
                 try {
-                    if (this.stateController) this.stateController.setPenColor(e.target.value);
-                    else this.penColor = e.target.value;
+                    const next = e && e.target ? e.target.value : null;
+                    if (this.stateController) this.stateController.setPenColor(next);
+                    else this.penColor = next;
+                } catch (ee) {}
+            });
+            colorInput.addEventListener('change', (e) => {
+                try {
+                    const next = e && e.target ? e.target.value : null;
+                    if (this.stateController) this.stateController.setPenColor(next);
+                    else this.penColor = next;
+                    this._applyTileBrushColor(next, this.selectedAnimation);
                 } catch (ee) {}
             });
             // Prevent mouse bleed into JS UI while hovering the DOM color picker.
@@ -7154,6 +7163,7 @@ export class SpriteScene extends Scene {
             let ctrlHeld = this.keys.held('Control',true)
             if (ctrlHeld) {
                 try {
+                    const tilePixelCanvas = !!(this.tilemode && this.currentSprite && Number(this.currentSprite.slicePx) === 1);
                     // Tile eyedrop (render-only tilemode): capture tile binding + transform
                     try {
                         if (renderOnlyTile && typeof pos.areaIndex === 'number') {
@@ -7168,7 +7178,7 @@ export class SpriteScene extends Scene {
                             }
                             this._tileBrushBinding = binding ? { ...binding } : { anim: this.selectedAnimation, index: this.selectedFrame };
                             this._tileBrushTransform = transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null;
-                            return;
+                            if (!tilePixelCanvas) return;
                         }
                     } catch (e) { /* ignore tile eyedrop errors */ }
 
@@ -7202,34 +7212,44 @@ export class SpriteScene extends Scene {
                         // noop while cancelled
                     } else {
                         const posPrev = this.getPos(this.mouse.prevPos);
-                        if (posPrev && posPrev.inside && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
+                        const posSample = posPrev || pos;
+                        if (posSample && (posSample.inside || (tilePixelCanvas && posSample.renderOnly)) && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
                             const sheet = this.currentSprite;
                             // Prefer area binding only in tilemode; otherwise sample selected frame.
                             let anim = this.selectedAnimation;
                             let frameIdx = this.selectedFrame;
-                            if (this.tilemode && typeof posPrev.areaIndex === 'number') {
-                                const binding = this.getAreaBinding(posPrev.areaIndex);
+                            let hasBinding = false;
+                            if (this.tilemode && typeof posSample.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(posSample.areaIndex);
                                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                                     anim = binding.anim;
                                     frameIdx = Number(binding.index);
+                                    hasBinding = true;
                                 }
                             }
-                            const frameCanvas = sheet.getFrame(anim, frameIdx);
-                            if (frameCanvas) {
-                                const ctx = frameCanvas.getContext('2d');
-                                try {
-                                    const d = ctx.getImageData(posPrev.x, posPrev.y, 1, 1).data;
-                                    // set internal pen color including alpha
-                                    const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
-                                    if (this.stateController) this.stateController.setPenColor(hex8);
-                                    else this.penColor = hex8;
-                                    // update HTML color input (6-digit, drop alpha)
-                                    if (this._colorInput) {
-                                        const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
-                                        this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
+                            if (!(posSample.renderOnly && tilePixelCanvas && !hasBinding)) {
+                                const frameCanvas = sheet.getFrame(anim, frameIdx);
+                                if (frameCanvas) {
+                                    const ctx = frameCanvas.getContext('2d');
+                                    try {
+                                        const px = posSample.renderOnly ? 0 : posSample.x;
+                                        const py = posSample.renderOnly ? 0 : posSample.y;
+                                        if (!(px < 0 || py < 0 || px >= frameCanvas.width || py >= frameCanvas.height)) {
+                                            const d = ctx.getImageData(px, py, 1, 1).data;
+                                            // set internal pen color including alpha
+                                            const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
+                                            if (this.stateController) this.stateController.setPenColor(hex8);
+                                            else this.penColor = hex8;
+                                            // update HTML color input (6-digit, drop alpha)
+                                            if (this._colorInput) {
+                                                const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                                this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
+                                            }
+                                            this._applyTileBrushColor(hex8, anim);
+                                        }
+                                    } catch (e) {
+                                        // ignore getImageData errors
                                     }
-                                } catch (e) {
-                                    // ignore getImageData errors
                                 }
                             }
                         }
@@ -7275,6 +7295,7 @@ export class SpriteScene extends Scene {
                                     const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
                                     this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
                                 }
+                                this._applyTileBrushColor(hex8, anim);
                             } catch (e) {
                                 // ignore getImageData errors
                             }
@@ -8375,10 +8396,48 @@ export class SpriteScene extends Scene {
                 if (this.keys && typeof this.keys.released === 'function' && this.keys.released('j')) {
                     const sheet = this.currentSprite;
                     if (!sheet) return;
+                    const tilePixelCanvas = this.tilemode && Number(sheet.slicePx) === 1;
+                    if (tilePixelCanvas) {
+                        const areaIndices = this._getTileSelectionAreaIndices();
+                        if (areaIndices && areaIndices.length > 0) {
+                            const tileSamples = [];
+                            for (const ai of areaIndices) {
+                                const binding = this.getAreaBinding(ai);
+                                if (!binding || binding.anim === undefined || binding.index === undefined) continue;
+                                const anim = binding.anim || this.selectedAnimation;
+                                const frameIdx = Number(binding.index) || 0;
+                                const hex = this._getTileFrameColorHex(anim, frameIdx);
+                                if (!hex) continue;
+                                const rgb = Color.convertColor(hex).toRgb();
+                                if (!rgb) continue;
+                                tileSamples.push([rgb.a || 0, rgb.b || 0, rgb.c || 0, Math.round((rgb.d ?? 1) * 255)]);
+                            }
+                            if (tileSamples.length > 0) {
+                                let r = 0, g = 0, b = 0, a = 0;
+                                for (const s of tileSamples) { r += (s[0] || 0); g += (s[1] || 0); b += (s[2] || 0); a += (s[3] || 0); }
+                                const n = tileSamples.length;
+                                r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n); a = Math.round(a / n);
+                                const hex8 = this.rgbaToHex(r, g, b, a);
+                                if (this.stateController) this.stateController.setPenColor(hex8);
+                                else this.penColor = hex8;
+                                if (this._colorInput) {
+                                    const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                    try { this._colorInput.value = '#' + toHex(r) + toHex(g) + toHex(b); } catch (e) {}
+                                }
+                                this._applyTileBrushColor(hex8, this.selectedAnimation);
+                                try { this._playSfx('color.combine'); } catch (e) {}
+                                return;
+                            }
+                        }
+                    }
                     const samples = [];
+                    const tilePoints = (!this.selectionPoints || this.selectionPoints.length === 0) && !this.selectionRegion
+                        ? this._getTilePixelSelectionPoints()
+                        : null;
+                    const pointSelection = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints : tilePoints;
                     // explicit point selection
-                    if (this.selectionPoints && this.selectionPoints.length > 0) {
-                        for (const p of this.selectionPoints) {
+                    if (pointSelection && pointSelection.length > 0) {
+                        for (const p of pointSelection) {
                             if (!p) continue;
                             const target = this._resolveAnimFrameForArea(p.areaIndex, this.selectedAnimation, this.selectedFrame);
                             const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
@@ -8444,10 +8503,22 @@ export class SpriteScene extends Scene {
                     // Reduce hue adjustments to a smaller fraction so keys change hue more finely
                     const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
                     const appliedDelta = direction * this.state.brush.pixelBrush.adjustAmount[channel] * channelMultiplier;
+                    const tilePixelCanvas = this.tilemode && Number(sheet.slicePx) === 1;
+                    if (tilePixelCanvas) {
+                        const areaIndices = this._getTileSelectionAreaIndices();
+                        if (areaIndices && areaIndices.length > 0) {
+                            this._adjustTileSelectionColors(areaIndices, channel, appliedDelta);
+                            return;
+                        }
+                    }
+                    const tilePoints = (!this.selectionPoints || this.selectionPoints.length === 0) && !this.selectionRegion
+                        ? this._getTilePixelSelectionPoints()
+                        : null;
+                    const pointSelection = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints : tilePoints;
 
                     // point selection
-                    if (this.selectionPoints && this.selectionPoints.length > 0) {
-                        for (const p of this.selectionPoints) {
+                    if (pointSelection && pointSelection.length > 0) {
+                        for (const p of pointSelection) {
                             if (!p) continue;
                             // Prefer explicit per-point areaIndex; otherwise fall back to region or hovered tile
                             let useArea = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
@@ -8535,7 +8606,7 @@ export class SpriteScene extends Scene {
                     }
 
                     // No active selection: apply adjustment to the current pen/draw color
-                    if ((!this.selectionPoints || this.selectionPoints.length === 0) && !this.selectionRegion) {
+                    if ((!pointSelection || pointSelection.length === 0) && !this.selectionRegion) {
                         try {
                             const cur = this.penColor || '#000000';
                             const col = Color.convertColor(cur);
@@ -8554,6 +8625,7 @@ export class SpriteScene extends Scene {
                             const newHex8 = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
                             if (this.stateController) this.stateController.setPenColor(newHex8);
                             else this.penColor = newHex8;
+                            if (tilePixelCanvas) this._applyTileBrushColor(newHex8, this.selectedAnimation);
                             // sync HTML color input (drop alpha component)
                             if (this._colorInput) {
                                 const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
@@ -9487,6 +9559,321 @@ export class SpriteScene extends Scene {
             }
         }
         return { anim, frameIdx };
+    }
+
+    // Map tile selections to pixel points when tile size is 1.
+    _getTilePixelSelectionPoints(posHint = null) {
+        try {
+            if (!this.tilemode || !this.currentSprite) return null;
+            const slice = Number(this.currentSprite.slicePx || 0);
+            if (slice !== 1) return null;
+            const points = [];
+            const addAreaIndex = (ai) => {
+                if (!Number.isFinite(ai)) return;
+                let binding = null;
+                try { binding = this.getAreaBinding ? this.getAreaBinding(ai) : null; } catch (e) { binding = null; }
+                if (!binding || binding.anim === undefined || binding.index === undefined) return;
+                points.push({ x: 0, y: 0, areaIndex: ai | 0 });
+            };
+
+            if (this._tileSelection && this._tileSelection.size > 0) {
+                for (const key of this._tileSelection.values()) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    const idx = this._getAreaIndexForCoord(c.col, c.row);
+                    addAreaIndex(idx);
+                }
+            } else {
+                const pos = posHint || this.getPos(this.mouse && this.mouse.pos);
+                if (pos && pos.renderOnly && Number.isFinite(pos.areaIndex)) {
+                    addAreaIndex(pos.areaIndex);
+                }
+            }
+
+            return points.length ? points : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _normalizeColorHex8(color) {
+        try {
+            const col = Color.convertColor(color || '#000000');
+            const rgb = col.toRgb();
+            const r = Math.round(rgb.a || 0);
+            const g = Math.round(rgb.b || 0);
+            const b = Math.round(rgb.c || 0);
+            const a = Math.round((rgb.d ?? 1) * 255);
+            return this.rgbaToHex(r, g, b, a);
+        } catch (e) {
+            return '#000000FF';
+        }
+    }
+
+    _getTileFrameColorHex(anim, frameIdx) {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.getFrame !== 'function') return null;
+            const frame = sheet.getFrame(anim, frameIdx);
+            if (!frame || !frame.getContext) return null;
+            const ctx = frame.getContext('2d');
+            const d = ctx.getImageData(0, 0, 1, 1).data;
+            return this.rgbaToHex(d[0], d[1], d[2], d[3]);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getTileStepReuseMap() {
+        try {
+            if (this._tileStepLastCreatedSheet !== this.currentSprite) {
+                this._tileStepLastCreatedSheet = this.currentSprite;
+                this._tileStepLastCreated = new Map();
+            }
+            if (!this._tileStepLastCreated || !(this._tileStepLastCreated instanceof Map)) this._tileStepLastCreated = new Map();
+            return this._tileStepLastCreated;
+        } catch (e) {
+            this._tileStepLastCreated = new Map();
+            return this._tileStepLastCreated;
+        }
+    }
+
+    _isTileFrameUsed(anim, frameIdx) {
+        try {
+            const name = (anim !== null && anim !== undefined) ? anim : this.selectedAnimation;
+            const idx = Number(frameIdx);
+            if (!Number.isFinite(idx)) return false;
+            const matches = (b) => {
+                if (!b) return false;
+                if (b.anim !== name) return false;
+                const bi = Number(b.index);
+                if (Number.isFinite(bi) && bi === idx) return true;
+                if (Array.isArray(b.multiFrames)) {
+                    for (const mf of b.multiFrames) { if (Number(mf) === idx) return true; }
+                }
+                return false;
+            };
+            const seen = new Set();
+            const check = (arr) => {
+                if (!Array.isArray(arr) || seen.has(arr)) return false;
+                seen.add(arr);
+                for (const b of arr) { if (matches(b)) return true; }
+                return false;
+            };
+            if (check(this._areaBindings)) return true;
+            if (Array.isArray(this._tileLayers)) {
+                for (const layer of this._tileLayers) {
+                    if (layer && check(layer.bindings)) return true;
+                }
+            }
+            return false;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _setTileFrameColor(anim, frameIdx, colorHex) {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet) return false;
+            if (typeof sheet.setPixel === 'function') return sheet.setPixel(anim, frameIdx, 0, 0, colorHex, 'replace');
+            if (typeof sheet.modifyFrame === 'function') return sheet.modifyFrame(anim, frameIdx, { x: 0, y: 0, color: colorHex, blendType: 'replace' });
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _ensureTileFrameForColorStep(anim, colorHex, cache = null) {
+        try {
+            if (!this.currentSprite) return null;
+            const name = (anim !== null && anim !== undefined) ? anim : this.selectedAnimation;
+            const hex8 = this._normalizeColorHex8(colorHex);
+            const cacheKey = String(name || '') + '|' + hex8;
+            if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+
+            const count = Math.max(0, Number(this._getAnimationLogicalFrameCountExact(name)) || 0);
+            for (let i = 0; i < count; i++) {
+                const existing = this._getTileFrameColorHex(name, i);
+                if (existing && String(existing).toUpperCase() === String(hex8).toUpperCase()) {
+                    const hit = { anim: name, frameIdx: i, hex8, created: false };
+                    if (cache) cache.set(cacheKey, hit);
+                    return hit;
+                }
+            }
+
+            const reuseMap = this._getTileStepReuseMap();
+            const reuseKey = String(name || '');
+            let last = reuseMap.get(reuseKey) || null;
+            if (last) {
+                const lastAnim = last.anim || name;
+                const maxCount = Math.max(0, Number(this._getAnimationLogicalFrameCountExact(lastAnim)) || 0);
+                if (!Number.isFinite(Number(last.frameIdx)) || last.frameIdx < 0 || last.frameIdx >= maxCount) {
+                    reuseMap.delete(reuseKey);
+                    last = null;
+                }
+            }
+            if (last && !this._isTileFrameUsed(last.anim || name, last.frameIdx)) {
+                this._setTileFrameColor(last.anim || name, last.frameIdx, hex8);
+                const reused = { anim: last.anim || name, frameIdx: last.frameIdx, hex8, created: false, reused: true };
+                if (cache) cache.set(cacheKey, reused);
+                reuseMap.set(reuseKey, { anim: reused.anim, frameIdx: reused.frameIdx });
+                return reused;
+            }
+
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.insertFrame !== 'function') return null;
+            sheet.insertFrame(name);
+            const newIndex = Math.max(0, Number(this._getAnimationLogicalFrameCountExact(name)) - 1);
+            this._setTileFrameColor(name, newIndex, hex8);
+            const created = { anim: name, frameIdx: newIndex, hex8, created: true };
+            if (cache) cache.set(cacheKey, created);
+            reuseMap.set(reuseKey, { anim: name, frameIdx: newIndex });
+            return created;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _ensureTileFrameForColor(anim, colorHex, cache = null) {
+        try {
+            if (!this.currentSprite) return null;
+            const name = (anim !== null && anim !== undefined) ? anim : this.selectedAnimation;
+            const hex8 = this._normalizeColorHex8(colorHex);
+            const cacheKey = String(name || '') + '|' + hex8;
+            if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+
+            const count = Math.max(0, Number(this._getAnimationLogicalFrameCountExact(name)) || 0);
+            for (let i = 0; i < count; i++) {
+                const existing = this._getTileFrameColorHex(name, i);
+                if (existing && String(existing).toUpperCase() === String(hex8).toUpperCase()) {
+                    const hit = { anim: name, frameIdx: i, hex8, created: false };
+                    if (cache) cache.set(cacheKey, hit);
+                    return hit;
+                }
+            }
+
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.insertFrame !== 'function') return null;
+            sheet.insertFrame(name);
+            const newIndex = Math.max(0, Number(this._getAnimationLogicalFrameCountExact(name)) - 1);
+            this._setTileFrameColor(name, newIndex, hex8);
+            const created = { anim: name, frameIdx: newIndex, hex8, created: true };
+            if (cache) cache.set(cacheKey, created);
+            return created;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _applyTileBrushColor(colorHex, animHint = null) {
+        try {
+            if (!this.tilemode || !this.currentSprite || Number(this.currentSprite.slicePx) !== 1) return null;
+            const anim = (animHint !== null && animHint !== undefined) ? animHint : this.selectedAnimation;
+            const entry = this._ensureTileFrameForColor(anim, colorHex);
+            if (!entry) return null;
+            if (this.stateController) this.stateController.setActiveSelection(entry.anim, entry.frameIdx);
+            else {
+                this.selectedAnimation = entry.anim;
+                this.selectedFrame = entry.frameIdx;
+            }
+            this._tileBrushBinding = { anim: entry.anim, index: entry.frameIdx };
+            return entry;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getTileSelectionAreaIndices(posHint = null) {
+        try {
+            if (!this.tilemode) return null;
+            const out = [];
+            const seen = new Set();
+            const pushArea = (ai) => {
+                if (!Number.isFinite(Number(ai))) return;
+                const key = String(Number(ai) | 0);
+                if (seen.has(key)) return;
+                seen.add(key);
+                out.push(Number(ai) | 0);
+            };
+
+            if (Array.isArray(this.selectionPoints) && this.selectionPoints.length > 0) {
+                for (const p of this.selectionPoints) {
+                    if (!p || !Number.isFinite(Number(p.areaIndex))) continue;
+                    pushArea(p.areaIndex);
+                }
+            } else if (this.selectionRegion && Number.isFinite(Number(this.selectionRegion.areaIndex))) {
+                pushArea(this.selectionRegion.areaIndex);
+            }
+
+            if (out.length === 0 && this._tileSelection && this._tileSelection.size > 0) {
+                for (const key of this._tileSelection.values()) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    pushArea(this._getAreaIndexForCoord(c.col, c.row));
+                }
+            }
+
+            if (out.length === 0) {
+                const pos = posHint || this.getPos(this.mouse && this.mouse.pos);
+                if (pos && Number.isFinite(Number(pos.areaIndex))) pushArea(pos.areaIndex);
+            }
+
+            return out.length ? out : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _adjustTileSelectionColors(areaIndices, channel, appliedDelta) {
+        try {
+            if (!Array.isArray(areaIndices) || areaIndices.length === 0) return false;
+            const sheet = this.currentSprite;
+            if (!sheet) return false;
+            const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+            const cache = new Map();
+            let changed = false;
+
+            for (const ai of areaIndices) {
+                const binding = this.getAreaBinding(ai);
+                if (!binding || binding.anim === undefined || binding.index === undefined) continue;
+                const anim = binding.anim || this.selectedAnimation;
+                const frameIdx = Number(binding.index) || 0;
+                const srcHex = this._getTileFrameColorHex(anim, frameIdx);
+                if (!srcHex) continue;
+                const hsv = Color.convertColor(srcHex).toHsv();
+                if (!hsv) continue;
+
+                switch (channel) {
+                    case 'h':
+                        hsv.a = (hsv.a + appliedDelta) % 1; if (hsv.a < 0) hsv.a += 1;
+                        break;
+                    case 's':
+                        hsv.b = clamp(hsv.b + appliedDelta, 0, 1);
+                        break;
+                    case 'v':
+                        hsv.c = clamp(hsv.c + appliedDelta, 0, 1);
+                        break;
+                    case 'a':
+                        hsv.d = clamp(hsv.d + appliedDelta, 0, 1);
+                        break;
+                }
+
+                const rgb = hsv.toRgb();
+                if (!rgb) continue;
+                const nextHex = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
+                const target = this._ensureTileFrameForColorStep(anim, nextHex, cache);
+                if (!target) continue;
+                if (target.anim === anim && Number(target.frameIdx) === frameIdx) continue;
+                const entry = { ...binding, anim: target.anim, index: target.frameIdx };
+                this._setAreaBindingAtIndex(ai, entry, true);
+                changed = true;
+            }
+
+            return changed;
+        } catch (e) {
+            return false;
+        }
     }
 
     _getShapeAnchorPoint(posInfo = null) {
