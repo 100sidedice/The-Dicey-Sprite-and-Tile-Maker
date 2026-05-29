@@ -1659,8 +1659,10 @@ export class SpriteScene extends Scene {
             const zoomStep = this.zoomStep || -0.001;
             let desiredFactor = Math.exp(zoomStep * delta);
             // compute desired zooms and clamp to scene limits
-            let desiredZoomX = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom.x * desiredFactor));
-            let desiredZoomY = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom.y * desiredFactor));
+            const zoomMax = (this.currentSprite.slicePx===1) ? this.maxZoom * 0.05 : this.maxZoom // if 1x1 tilemode enabled, max zoom is larger
+            const zoomMin = (this.currentSprite.slicePx===1) ? this.minZoom * 0.5 : this.minZoom // if 1x1 tilemode enabled, max zoom is larger
+            let desiredZoomX = Math.max(zoomMin, Math.min(zoomMax, this.zoom.x * desiredFactor));
+            let desiredZoomY = Math.max(zoomMin, Math.min(zoomMax, this.zoom.y * desiredFactor));
 
             // Instead of applying immediately, add an impulse to zoom velocity so we smooth over time.
             // The impulse magnitude is proportional to the delta between desired and current zoom.
@@ -3129,11 +3131,11 @@ export class SpriteScene extends Scene {
 
             let moveX = (right ? 1 : 0) - (left ? 1 : 0);
             let moveY = (down ? 1 : 0) - (up ? 1 : 0);
-            const speed = player.gravityEnabled ? 70 : 70;
-            const gravityAcc = 170;
-            const jumpVel = 90;
-            const maxFallSpeed = Math.max(1, Number(player.maxFallSpeed) || 220);
-            const coyoteMax = Math.max(0, Number(player.coyoteTimeMax) || 0.12);
+            const speed = (player.gravityEnabled ? 70 : 70) * slice/16;
+            const gravityAcc = (170) * slice/16;
+            const jumpVel = (90) * slice/16;
+            const maxFallSpeed = Math.max(1, Number(player.maxFallSpeed) || 220) * slice/16;
+            const coyoteMax = Math.max(0, Number(player.coyoteTimeMax) || 0.12) * slice/16;
 
             // Ground probe is independent from collision response so tiny bounces do not kill jump readiness.
             if (player.gravityEnabled) {
@@ -3972,31 +3974,34 @@ export class SpriteScene extends Scene {
                 const dt = tickDelta || 0;
                 const mpos = (this.mouse && this.mouse.pos) ? this.mouse.pos : new Vector(0,0);
 
+                const maxZoom = (this.currentSprite.slicePx===1) ? this.maxZoom * 0.05 : this.maxZoom // if 1x1 tilemode enabled, max zoom is larger
+                const minZoom = (this.currentSprite.slicePx===1) ? this.minZoom * 0.5 : this.minZoom // if 1x1 tilemode enabled, max zoom is larger
                 // X axis
                 if (Math.abs(this.zoomVlos.x) > 1e-6) {
                     const oldZoomX = this.zoom.x || 1;
                     let newZoomX = oldZoomX + this.zoomVlos.x * dt;
+            
                     // clamp
-                    newZoomX = Math.max(this.minZoom, Math.min(this.maxZoom, newZoomX));
+                    newZoomX = Math.max(minZoom, Math.min(maxZoom, newZoomX));
                     if (newZoomX !== oldZoomX) {
                         // adjust offset so the screen point under the mouse stays fixed
                         this.offset.x = this.offset.x + mpos.x * (1 / newZoomX - 1 / oldZoomX);
                         this.zoom.x = newZoomX;
                     }
                     // if clamped hard, kill velocity in that axis
-                    if (newZoomX === this.minZoom || newZoomX === this.maxZoom) this.zoomVlos.x = 0;
+                    if (newZoomX === minZoom || newZoomX === maxZoom) this.zoomVlos.x = 0;
                 }
 
                 // Y axis
                 if (Math.abs(this.zoomVlos.y) > 1e-6) {
                     const oldZoomY = this.zoom.y || 1;
                     let newZoomY = oldZoomY + this.zoomVlos.y * dt;
-                    newZoomY = Math.max(this.minZoom, Math.min(this.maxZoom, newZoomY));
+                    newZoomY = Math.max(minZoom, Math.min(maxZoom, newZoomY));
                     if (newZoomY !== oldZoomY) {
                         this.offset.y = this.offset.y + mpos.y * (1 / newZoomY - 1 / oldZoomY);
                         this.zoom.y = newZoomY;
                     }
-                    if (newZoomY === this.minZoom || newZoomY === this.maxZoom) this.zoomVlos.y = 0;
+                    if (newZoomY === minZoom || newZoomY === maxZoom) this.zoomVlos.y = 0;
                 }
 
                 // Damping
