@@ -5163,7 +5163,15 @@ export class SpriteScene extends Scene {
 
             const offset = Math.floor(Math.random() * 3) - 1;
             const colorHsv = Color.convertColor(baseColor || '#000000').toHsv();
-            const baseStep = (this._getAdjustPercent && typeof this._getAdjustPercent === 'function') ? this._getAdjustPercent('v') : 0.1;
+            const channel = (this.state && this.state.brush && this.state.brush.pixelBrush && this.state.brush.pixelBrush.channel) ? this.state.brush.pixelBrush.channel : 'v';
+            let baseStepRaw = (this._getAdjustPercent && typeof this._getAdjustPercent === 'function') ? this._getAdjustPercent(channel) : undefined;
+            if (!Number.isFinite(baseStepRaw)) {
+                baseStepRaw = (this.state && this.state.brush && this.state.brush.pixelBrush && this.state.brush.pixelBrush.adjustAmount && typeof this.state.brush.pixelBrush.adjustAmount[channel] === 'number')
+                    ? this.state.brush.pixelBrush.adjustAmount[channel]
+                    : (typeof this.adjustAmount === 'number' ? this.adjustAmount : 0.05);
+            }
+            let baseStep = Number(baseStepRaw) || 0;
+            if (baseStep > 1) baseStep = baseStep / 100; // allow UI to provide percent (e.g. 5 -> 0.05)
             const delta = offset * baseStep;
             const newV = Math.max(0, Math.min(1, colorHsv.c + delta));
             const jitterColorHsv = new Color(colorHsv.a, colorHsv.b, newV, colorHsv.d, 'hsv');
