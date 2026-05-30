@@ -61,6 +61,11 @@ export class SpriteScene extends Scene {
             [0, -1], [1, 0], [0, 1], [-1, 0],
             [-1, -1], [1, -1], [1, 1], [-1, 1]
         ];
+        // Jitter brush state
+        this._jitterBrushActive = false;
+        this._lastJitterPaintTime = 0;
+        // Dilither (checkerboard) mode: 0=off, 1=checker1 (even), 2=checker2 (odd)
+        this._dilitherMode = 0;
     }
 
     onReady() {
@@ -3550,10 +3555,45 @@ export class SpriteScene extends Scene {
             // Reset latch when Shift is not held to allow future activations
             if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
 
+            const anyNumberHeld = ['1','2','3','4','5'].some(k => this.keys.held(k));
+
+            // Jitter brush activation: hold any number (1-5) then TAP 'n' to activate jitter mode.
+            // Pressing 'n' without a held number does nothing here.
+            if (this.keys.pressed('n') || this.keys.pressed('N')) {
+                if (anyNumberHeld) {
+                    const numHeld = numKeys.some(k => this.keys.held(k));
+                    if (numHeld) {
+                        this._jitterBrushActive = true;
+                        this._lastJitterPaintTime = 0; // Reset timer so next paint happens immediately
+                        try { this._playSfx('color.channel'); } catch (e) {}
+                    }
+                }
+            }
+
+            // Jitter brush deactivation: press any number key (press event), not releasing.
+            // This prevents immediate deactivation on release.
+            if (this._jitterBrushActive) {
+                const numPressedThisFrame = numKeys.some(k => this.keys.pressed(k));
+                if (numPressedThisFrame) {
+                    this._jitterBrushActive = false;
+                    this._lastJitterPaintTime = 0;
+                    try { this._playSfx('color.channel'); } catch (e) {}
+                }
+            }
+
             if (this.keys.released('6')) { this.stateController ? this.stateController.setAdjustChannel('h') : this.modifyState('h',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
             if (this.keys.released('7')) { this.stateController ? this.stateController.setAdjustChannel('s') : this.modifyState('s',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
             if (this.keys.released('8')) { this.stateController ? this.stateController.setAdjustChannel('v') : this.modifyState('v',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
             if (this.keys.released('9')) { this.stateController ? this.stateController.setAdjustChannel('a') : this.modifyState('a',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
+
+            // Dilither toggle: cycle off -> checker1 (even) -> checker2 (odd)
+            if (this.keys.released('d') || this.keys.released('D')) {
+                try {
+                    this._dilitherMode = (Number(this._dilitherMode) || 0) + 1;
+                    if (this._dilitherMode > 2) this._dilitherMode = 0;
+                    try { this._playSfx('toggle.onionSkin'); } catch (e) {}
+                } catch (e) {}
+            }
 
             // Arrow left/right step selected frame within the current animation.
             const framesArr = (this.currentSprite && this.currentSprite._frames && this.selectedAnimation)
@@ -4200,6 +4240,13 @@ export class SpriteScene extends Scene {
             const pos = this.getPos(this.mouse.pos);
             // When in render-only tilemode, treat the pen as a tile brush (place/erase bindings per tile).
             if (this.tilemode && pos && pos.renderOnly) {
+                try {
+                    const tilePixelCanvas = !!(this.currentSprite && Number(this.currentSprite.slicePx) === 1);
+                    if (tilePixelCanvas && this._jitterBrushActive) {
+                        const jitterHex = this._getJitterBrushColorHex(this.penColor || '#000000');
+                        if (jitterHex) this._applyTileBrushColor(jitterHex, this.selectedAnimation);
+                    }
+                } catch (e) {}
                 resetStroke();
                 this._handleRenderOnlyTilePaint(pos);
                 return;
@@ -4225,7 +4272,8 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            const color = this.penColor || '#000000';
+            const color = this._getJitterBrushColorHex(this.penColor || '#000000') || (this.penColor || '#000000');
+            
             const side = Math.max(1, Math.min(15, this.brushSize || 1));
             const half = Math.floor((side - 1) / 2);
             const areaIndexForPos = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
@@ -4445,7 +4493,19 @@ export class SpriteScene extends Scene {
                     if (currentWorld) strokeState.left = { x: currentWorld.x, y: currentWorld.y };
                     // prevent normal pen draw this tick
                 } else {
-                    const worldPixels = buildStrokeWorldPixels('left');
+                    let worldPixels = buildStrokeWorldPixels('left');
+                    // Apply dilither modulus filter using onion range as x/y divisors.
+                    try {
+                        if (this._dilitherMode === 1 || this._dilitherMode === 2) {
+                            const filtered = [];
+                            for (let i = 0; i < worldPixels.length; i++) {
+                                const p = worldPixels[i];
+                                if (!p) continue;
+                                if (this._shouldDilitherPaintCell(p.x, p.y)) filtered.push(p);
+                            }
+                            worldPixels = filtered;
+                        }
+                    } catch (e) {}
                     let _wpChanged = false;
                     try {
                         _wpChanged = !!this._anyWorldPixelWouldChange(worldPixels, color);
@@ -4456,7 +4516,18 @@ export class SpriteScene extends Scene {
             }
             if (rightHeld) { // erase NxN square
                 const eraseColor = '#00000000';
-                const worldPixels = buildStrokeWorldPixels('right');
+                let worldPixels = buildStrokeWorldPixels('right');
+                try {
+                    if (this._dilitherMode === 1 || this._dilitherMode === 2) {
+                        const filtered = [];
+                        for (let i = 0; i < worldPixels.length; i++) {
+                            const p = worldPixels[i];
+                            if (!p) continue;
+                            if (this._shouldDilitherPaintCell(p.x, p.y)) filtered.push(p);
+                        }
+                        worldPixels = filtered;
+                    }
+                } catch (e) {}
                 let _wpChanged2 = false;
                 try {
                     _wpChanged2 = !!this._anyWorldPixelWouldChange(worldPixels, eraseColor);
@@ -4484,6 +4555,13 @@ export class SpriteScene extends Scene {
     _handleRenderOnlyTilePaint(pos) {
         try {
             if (!this.tilemode) return;
+            const tilePixelCanvas = !!(this.currentSprite && Number(this.currentSprite.slicePx) === 1);
+            if (tilePixelCanvas && this._jitterBrushActive) {
+                try {
+                    const jitterHex = this._getJitterBrushColorHex(this.penColor || '#000000');
+                    if (jitterHex) this._applyTileBrushColor(jitterHex, this.selectedAnimation);
+                } catch (e) {}
+            }
             const leftHeld = this._drawHeld('left');
             const rightHeld = this._drawHeld('right');
             if (!leftHeld && !rightHeld) {
@@ -4550,6 +4628,25 @@ export class SpriteScene extends Scene {
                 write++;
             }
             tiles.length = write;
+            // Apply dilither filtering for render-only tile paint using the shared modulus rule.
+            try {
+                if (this._dilitherMode === 1 || this._dilitherMode === 2) {
+                    const filtered = [];
+                    let fw = 0;
+                    for (let i = 0; i < tiles.length; i++) {
+                        const t = tiles[i];
+                        if (!t) continue;
+                        const worldX = (Number(t.col) || 0) * (Number(this.currentSprite && this.currentSprite.slicePx) || 1);
+                        const worldY = (Number(t.row) || 0) * (Number(this.currentSprite && this.currentSprite.slicePx) || 1);
+                        if (this._shouldDilitherPaintCell(worldX, worldY)) {
+                            filtered[fw++] = t;
+                        }
+                    }
+                    filtered.length = fw;
+                    tiles.length = filtered.length;
+                    for (let i = 0; i < filtered.length; i++) tiles[i] = filtered[i];
+                }
+            } catch (e) {}
             if (!tiles.length) return;
 
             // SFX: play once on press.
@@ -5050,6 +5147,65 @@ export class SpriteScene extends Scene {
     _noise01(x, y, seed = 1) {
         const n = Math.sin((x * 127.1) + (y * 311.7) + (seed * 74.7)) * 43758.5453123;
         return n - Math.floor(n);
+    }
+
+    _getJitterBrushColorHex(baseColor = '#000000') {
+        try {
+            if (!this._jitterBrushActive) return baseColor;
+            const fps = (typeof this._getSpriteAnimationFps === 'function')
+                ? this._getSpriteAnimationFps(this.selectedAnimation, 8)
+                : 8;
+            const frameTime = fps > 0 ? (1 / fps) : 0.125;
+            const now = Date.now();
+            const elapsed = (now - (this._lastJitterPaintTime || 0)) / 1000;
+            if (elapsed < frameTime) return null;
+            this._lastJitterPaintTime = now;
+
+            const offset = Math.floor(Math.random() * 3) - 1;
+            const colorHsv = Color.convertColor(baseColor || '#000000').toHsv();
+            const baseStep = (this._getAdjustPercent && typeof this._getAdjustPercent === 'function') ? this._getAdjustPercent('v') : 0.1;
+            const delta = offset * baseStep;
+            const newV = Math.max(0, Math.min(1, colorHsv.c + delta));
+            const jitterColorHsv = new Color(colorHsv.a, colorHsv.b, newV, colorHsv.d, 'hsv');
+            const jitterColorRgb = jitterColorHsv.toRgb();
+            return this.rgbaToHex(
+                Math.round(jitterColorRgb.a),
+                Math.round(jitterColorRgb.b),
+                Math.round(jitterColorRgb.c),
+                Math.round((jitterColorRgb.d ?? 1) * 255)
+            );
+        } catch (e) {
+            return baseColor;
+        }
+    }
+
+    _getDilitherDivisors() {
+        try {
+            const range = (this && this.onionRange && typeof this.onionRange === 'object') ? this.onionRange : null;
+            const rawX = Number(range && range.before !== undefined ? range.before : 1);
+            const rawY = Number(range && range.after !== undefined ? range.after : 1);
+            const xDiv = Math.max(1, Math.abs(Math.floor(Number.isFinite(rawX) ? rawX : 1)) + 1);
+            const yDiv = Math.max(1, Math.abs(Math.floor(Number.isFinite(rawY) ? rawY : 1)) + 1);
+            return { xDiv, yDiv };
+        } catch (e) {
+            return { xDiv: 1, yDiv: 1 };
+        }
+    }
+
+    _shouldDilitherPaintCell(x, y) {
+        try {
+            if (this._dilitherMode !== 1 && this._dilitherMode !== 2) return true;
+            const { xDiv, yDiv } = this._getDilitherDivisors();
+            const ix = Math.floor(Number(x) || 0);
+            const iy = Math.floor(Number(y) || 0);
+            const mod = (value, divisor) => ((value % divisor) + divisor) % divisor;
+            const xHit = mod(ix, xDiv) === 0;
+            const yHit = mod(iy, yDiv) === 0;
+            const paint = (xHit === yHit);
+            return (this._dilitherMode === 1) ? paint : !paint;
+        } catch (e) {
+            return true;
+        }
     }
 
     _getAnimationLogicalFrameCountExact(anim) {
@@ -8235,7 +8391,8 @@ export class SpriteScene extends Scene {
                                     try {
                                         this._fillSelectedTimeout = null;
                                         // If 'n' is held within the leeway, run the animated gradient+noise
-                                        if (this.keys && typeof this.keys.held === 'function' && this.keys.held('n', true) > 0) {
+                                        const anyNumberHeld_local = ['1','2','3','4','5'].some(k => this.keys.held(k) || this.keys.pressed(k));
+                                        if (this.keys && typeof this.keys.held === 'function' && this.keys.held('n', true) > 0 && !anyNumberHeld_local) {
                                             // Gather pixels like drawSelected did, then animate
                                             try {
                                                 const sheet = this.currentSprite;
@@ -8902,7 +9059,8 @@ export class SpriteScene extends Scene {
             } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
 
             // Add subtle noise/randomness to the current frame on 'n' release
-            const noisePressed = (this.keys.released('n') || this.keys.released('N'));
+            const anyNumberHeld_noise = ['1','2','3','4','5'].some(k => this.keys.held(k) || this.keys.pressed(k));
+            const noisePressed = (this.keys.released('n') || this.keys.released('N')) && !anyNumberHeld_noise;
             if (noisePressed) {
                 const sheet = this.currentSprite;
                 // Prefer selection-origin area/frame when applying noise
@@ -12009,10 +12167,13 @@ export class SpriteScene extends Scene {
                     const tCol = baseCol + (t.dc|0);
                     const tRow = baseRow + (t.dr|0);
                     const idx = this._getAreaIndexForCoord(tCol, tRow);
-                    this._activateTile(tCol, tRow);
-                    this._setAreaBindingAtIndex(idx, t.binding ? { ...t.binding } : { anim, index: frameIdx }, true);
-                    if (t.transform) this._setAreaTransformAtIndex(idx, { ...t.transform }, true);
+                    // Use non-sync ops while pasting many tiles to avoid per-tile network/undo overhead
+                    this._activateTile(tCol, tRow, false);
+                    this._setAreaBindingAtIndex(idx, t.binding ? { ...t.binding } : { anim, index: frameIdx }, false);
+                    if (t.transform) this._setAreaTransformAtIndex(idx, { ...t.transform }, false);
                 }
+                // Sync tile state once after batch paste
+                try { this._queueTileStateOp && this._queueTileStateOp(); } catch (e) {}
                 return;
             }
 
@@ -12051,39 +12212,79 @@ export class SpriteScene extends Scene {
                 }
             };
 
-            if (this.clipboard.type === 'points') {
-                const pixels = this.clipboard.pixels || [];
-                for (const p of pixels) {
-                    if (p.a === 0) continue;
-                    const wx = targetWorldX + p.x;
-                    const wy = targetWorldY + p.y;
-                    writeRGBAWorld(wx, wy, p.r, p.g, p.b, p.a);
+            if (this.clipboard.type === 'points' || this.clipboard.type === 'image') {
+                // Batch pixel writes per target frame to avoid repeated modifyFrame calls
+                const frameMap = new Map(); // key: anim+'::'+frame -> [{x,y,color,blendType},...]
+
+                const pushPixel = (wx, wy, r, g, b, a) => {
+                    if (a === 0) return;
+                    const t = this._worldPixelToTile(wx, wy, slice);
+                    if (!t) return;
+                    if (this.tilemode && !this._isTileActive(t.col, t.row)) return;
+                    let aIdx = this.tilemode ? t.areaIndex : null;
+                    let an = anim, fi = frameIdx;
+                    if (typeof aIdx === 'number') {
+                        const bnd = this.getAreaBinding(aIdx);
+                        if (bnd && bnd.anim !== undefined && bnd.index !== undefined) {
+                            an = bnd.anim;
+                            fi = Number(bnd.index);
+                        }
+                    }
+                    if (!an || !Number.isFinite(Number(fi))) return;
+                    const key = String(an) + '::' + String(fi | 0);
+                    const arr = frameMap.get(key) || [];
+                    arr.push({ x: t.localX, y: t.localY, color: this.rgbaToHex(r, g, b, a), blendType: 'replace' });
+                    frameMap.set(key, arr);
+                };
+
+                if (this.clipboard.type === 'points') {
+                    const pixels = this.clipboard.pixels || [];
+                    for (const p of pixels) {
+                        if (p.a === 0) continue;
+                        const wx = targetWorldX + p.x;
+                        const wy = targetWorldY + p.y;
+                        pushPixel(wx, wy, p.r, p.g, p.b, p.a);
+                    }
+                } else {
+                    const w = this.clipboard.w;
+                    const h = this.clipboard.h;
+                    const data = this.clipboard.data;
+                    for (let yy = 0; yy < h; yy++) {
+                        for (let xx = 0; xx < w; xx++) {
+                            const srcIdx = (yy * w + xx) * 4;
+                            const r = data[srcIdx];
+                            const g = data[srcIdx + 1];
+                            const b = data[srcIdx + 2];
+                            const a = data[srcIdx + 3];
+                            if (a === 0) continue;
+                            const wx = targetWorldX + xx;
+                            const wy = targetWorldY + yy;
+                            pushPixel(wx, wy, r, g, b, a);
+                        }
+                    }
                 }
+
+                // Apply batched changes per frame
+                try {
+                    for (const [key, changes] of frameMap.entries()) {
+                        if (!Array.isArray(changes) || changes.length === 0) continue;
+                        const parts = String(key).split('::');
+                        const an = parts[0];
+                        const fi = Number(parts[1]) | 0;
+                        if (typeof sheet.modifyFrame === 'function') {
+                            try { sheet.modifyFrame(an, fi, changes); } catch (e) {
+                                for (const c of changes) try { sheet.setPixel(an, fi, c.x, c.y, c.color, 'replace'); } catch (er) {}
+                            }
+                        } else {
+                            for (const c of changes) try { sheet.setPixel(an, fi, c.x, c.y, c.color, 'replace'); } catch (er) {}
+                        }
+                    }
+                } catch (e) { /* ignore batch errors */ }
+
                 if (typeof sheet._rebuildSheetCanvas === 'function') {
                     try { sheet._rebuildSheetCanvas(); } catch (e) { }
                 }
                 return;
-            }
-
-            // image clipboard paste (world-aware)
-            const w = this.clipboard.w;
-            const h = this.clipboard.h;
-            const data = this.clipboard.data; // Uint8ClampedArray
-            for (let yy = 0; yy < h; yy++) {
-                for (let xx = 0; xx < w; xx++) {
-                    const srcIdx = (yy * w + xx) * 4;
-                    const r = data[srcIdx];
-                    const g = data[srcIdx + 1];
-                    const b = data[srcIdx + 2];
-                    const a = data[srcIdx + 3];
-                    if (a === 0) continue;
-                    const wx = targetWorldX + xx;
-                    const wy = targetWorldY + yy;
-                    writeRGBAWorld(wx, wy, r, g, b, a);
-                }
-            }
-            if (typeof sheet._rebuildSheetCanvas === 'function') {
-                try { sheet._rebuildSheetCanvas(); } catch (e) { }
             }
         } catch (e) {
             console.warn('doPaste failed', e);
@@ -18116,8 +18317,9 @@ export class SpriteScene extends Scene {
             }
 
             if (mousePixelPos) {
-                // Color tokens: default white, switch to yellow when pixel-perfect pen enabled
+                // Color tokens: default white, switch to yellow when pixel-perfect pen enabled, or orange for jitter brush
                 const useYellow = (!this.tilemode && this.pixelPerfect) || (this.tilemode && this.autotile);
+                const useOrange = this._jitterBrushActive;
                 
                 // Determine if we should use black cursor on white/light pixels
                 let useBlackCursor = false;
@@ -18134,10 +18336,24 @@ export class SpriteScene extends Scene {
                     }
                 }
                 
-                const previewLineColor = useYellow ? '#FFFF0088' : (useBlackCursor ? '#00000088' : '#FFFFFF88');
-                const previewFillColor = useYellow ? '#FFFF0044' : (useBlackCursor ? '#00000044' : '#FFFFFF44');
-                const cursorFillColor = useYellow ? '#FFFF0022' : (useBlackCursor ? '#00000022' : '#FFFFFF22');
-                const cursorOutlineColor = useYellow ? '#FFFF00EE' : (useBlackCursor ? '#000000EE' : '#FFFFFFEE');
+                // Determine cursor colors based on mode priority: orange (jitter) > yellow (pixel-perfect) > white/black
+                let previewLineColor, previewFillColor, cursorFillColor, cursorOutlineColor;
+                if (useOrange) {
+                    previewLineColor = '#FF880088';
+                    previewFillColor = '#FF880044';
+                    cursorFillColor = '#FF880022';
+                    cursorOutlineColor = '#FF8800EE';
+                } else if (useYellow) {
+                    previewLineColor = '#FFFF0088';
+                    previewFillColor = '#FFFF0044';
+                    cursorFillColor = '#FFFF0022';
+                    cursorOutlineColor = '#FFFF00EE';
+                } else {
+                    previewLineColor = useBlackCursor ? '#00000088' : '#FFFFFF88';
+                    previewFillColor = useBlackCursor ? '#00000044' : '#FFFFFF44';
+                    cursorFillColor = useBlackCursor ? '#00000022' : '#FFFFFF22';
+                    cursorOutlineColor = useBlackCursor ? '#000000EE' : '#FFFFFFEE';
+                }
 
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
                     this.drawLine(anchor, mousePixelPos, previewLineColor, dstPos, cellW, cellH);
@@ -18182,17 +18398,34 @@ export class SpriteScene extends Scene {
 
                 // draw brush-sized cursor (NxN where N is this.brushSize)
                     try {
-                    const side = Math.max(1, Math.min(15, this.brushSize || 1));
-                    const half = Math.floor((side - 1) / 2);
-                    const sx = mousePixelPos.x - half;
-                    const sy = mousePixelPos.y - half;
-                    const drawX = dstPos.x + sx * cellW;
-                    const drawY = dstPos.y + sy * cellH;
-                    const drawW = side * cellW;
-                    const drawH = side * cellH;
-                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorFillColor, true);
-                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorOutlineColor, false, true, scaleOutline(2), cursorOutlineColor);
-                } catch (e) {
+                        const side = Math.max(1, Math.min(15, this.brushSize || 1));
+                        const half = Math.floor((side - 1) / 2);
+                        const sx = mousePixelPos.x - half;
+                        const sy = mousePixelPos.y - half;
+                        const drawX = dstPos.x + sx * cellW;
+                        const drawY = dstPos.y + sy * cellH;
+                        const drawW = side * cellW;
+                        const drawH = side * cellH;
+                        if (this._dilitherMode === 1 || this._dilitherMode === 2) {
+                            // Only draw cells that would actually be painted by the brush
+                            // when dilither is enabled. Use the same fill the brush would
+                            // use without dilither, and skip non-matching cells entirely.
+                            for (let yy = 0; yy < side; yy++) {
+                                for (let xx = 0; xx < side; xx++) {
+                                    const px = sx + xx;
+                                    const py = sy + yy;
+                                    if (!this._shouldDilitherPaintCell(px, py)) continue;
+                                    const ddx = dstPos.x + (px) * cellW;
+                                    const ddy = dstPos.y + (py) * cellH;
+                                    this.Draw.rect(new Vector(ddx, ddy), new Vector(cellW, cellH), cursorFillColor, true);
+                                }
+                            }
+                            this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorOutlineColor, false, true, scaleOutline(2), cursorOutlineColor);
+                        } else {
+                            this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorFillColor, true);
+                            this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorOutlineColor, false, true, scaleOutline(2), cursorOutlineColor);
+                        }
+                    } catch (e) {
                     const cellX = dstPos.x + mousePixelPos.x * cellW;
                     const cellY = dstPos.y + mousePixelPos.y * cellH;
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), cursorFillColor, true);
@@ -18409,13 +18642,27 @@ export class SpriteScene extends Scene {
                 const topLeft = this._tileCoordToPos(topLeftTile.col, topLeftTile.row, basePos, tileSize);
                 const rectPos = topLeft;
                 const rectSize = new Vector(side * tileSize.x, side * tileSize.y);
-                // use yellow cursor when autotile is enabled
+                const tilePixelCanvas = !!(this.currentSprite && Number(this.currentSprite.slicePx) === 1);
+                const useOrangeTileCursor = !!this._jitterBrushActive;
                 const useYellowTileCursor = !!this.autotile;
-                const cursorFill = useYellowTileCursor ? '#FFFF0022' : '#FFFFFF22';
-                const cursorStroke = useYellowTileCursor ? '#FFFF00EE' : '#FFFFFFEE';
-                    const strokeW = Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03));
+                const cursorFill = useOrangeTileCursor ? '#FF880022' : (useYellowTileCursor ? '#FFFF0022' : '#FFFFFF22');
+                const cursorStroke = useOrangeTileCursor ? '#FF8800EE' : (useYellowTileCursor ? '#FFFF00EE' : '#FFFFFFEE');
+                const strokeW = Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03));
+                if (tilePixelCanvas && (this._dilitherMode === 1 || this._dilitherMode === 2)) {
+                    for (let rr = 0; rr < side; rr++) {
+                        for (let cc = 0; cc < side; cc++) {
+                            const tc = topLeftTile.col + cc;
+                            const tr = topLeftTile.row + rr;
+                            if (!this._shouldDilitherPaintCell(tc, tr)) continue;
+                            const posVec = this._tileCoordToPos(tc, tr, basePos, tileSize);
+                            this.Draw.rect(posVec, tileSize, cursorFill, true);
+                        }
+                    }
+                    this.Draw.rect(rectPos, rectSize, cursorStroke, false, true, strokeW, cursorStroke);
+                } else {
                     this.Draw.rect(rectPos, rectSize, cursorFill, true);
                     this.Draw.rect(rectPos, rectSize, cursorStroke, false, true, strokeW, cursorStroke);
+                }
                 }
             }
 

@@ -2094,28 +2094,56 @@ export default class FrameSelect {
 
                     for (const t of activeTiles) {
                         const idx = getAreaIndex(t.col, t.row);
-                        const binding = (Number.isFinite(idx) && Array.isArray(scene._areaBindings)) ? scene._areaBindings[idx] : null;
-                        const anim = (binding && binding.anim) ? binding.anim : scene.selectedAnimation;
-                        const frameIndex = (binding && typeof binding.index === 'number') ? binding.index : scene.selectedFrame;
-                        const multiFrames = (binding && Array.isArray(binding.multiFrames)) ? binding.multiFrames : null;
-                        const frameCanvas = (anim !== null) ? buildFrame(anim, frameIndex, multiFrames) : null;
-                        if (!frameCanvas) continue;
-                        const transform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
-                        const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
                         const dx = (t.col - minC) * slice;
                         const dy = (t.row - minR) * slice;
-                        if (!hasTransform) {
-                            try { ectx.drawImage(frameCanvas, 0, 0, frameCanvas.width, frameCanvas.height, dx, dy, slice, slice); } catch (e) { /* ignore */ }
-                        } else {
-                            try {
-                                ectx.save();
-                                ectx.translate(dx + slice / 2, dy + slice / 2);
-                                if (transform.flipH) ectx.scale(-1, 1);
-                                ectx.rotate((transform.rot || 0) * Math.PI / 180);
-                                ectx.drawImage(frameCanvas, -slice / 2, -slice / 2, slice, slice);
-                                ectx.restore();
-                            } catch (e) { /* ignore */ }
+
+                        const composite = document.createElement('canvas');
+                        composite.width = slice; composite.height = slice;
+                        const cctx = composite.getContext('2d');
+                        try { cctx.imageSmoothingEnabled = false; } catch (e) {}
+
+                        // helper to draw a binding (anim/index/multiFrames) into composite, applying optional transform
+                        const drawBindingToComposite = (anim, index, multi, transform) => {
+                            if (anim === null || anim === undefined) return;
+                            const src = buildFrame(anim, index, multi);
+                            if (!src) return;
+                            if (transform && (transform.rot || transform.flipH)) {
+                                try {
+                                    cctx.save();
+                                    cctx.translate(slice / 2, slice / 2);
+                                    if (transform.flipH) cctx.scale(-1, 1);
+                                    if (transform.rot) cctx.rotate((transform.rot || 0) * Math.PI / 180);
+                                    cctx.drawImage(src, -slice / 2, -slice / 2, slice, slice);
+                                    cctx.restore();
+                                } catch (e) { /* ignore */ }
+                            } else {
+                                try { cctx.drawImage(src, 0, 0, slice, slice); } catch (e) { /* ignore */ }
+                            }
+                        };
+
+                        // draw base area binding (areaBindings/areaTransforms)
+                        const baseBinding = (Number.isFinite(idx) && Array.isArray(scene._areaBindings)) ? scene._areaBindings[idx] : null;
+                        const baseAnim = (baseBinding && baseBinding.anim) ? baseBinding.anim : scene.selectedAnimation;
+                        const baseIndex = (baseBinding && typeof baseBinding.index === 'number') ? baseBinding.index : scene.selectedFrame;
+                        const baseMulti = (baseBinding && Array.isArray(baseBinding.multiFrames)) ? baseBinding.multiFrames : null;
+                        const baseTransform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
+                        drawBindingToComposite(baseAnim, baseIndex, baseMulti, baseTransform);
+
+                        // draw other tile layers on top (preserve order)
+                        if (this.scene && Array.isArray(this.scene._tileLayers)) {
+                            for (const layer of this.scene._tileLayers) {
+                                if (!layer || !Array.isArray(layer.bindings)) continue;
+                                const lb = (Number.isFinite(idx) && Array.isArray(layer.bindings)) ? layer.bindings[idx] : null;
+                                if (!lb) continue;
+                                const lAnim = (lb && lb.anim !== undefined) ? lb.anim : null;
+                                const lIndex = (lb && lb.index !== undefined) ? lb.index : null;
+                                const lMulti = (lb && Array.isArray(lb.multiFrames)) ? lb.multiFrames : null;
+                                const lTransform = (Array.isArray(layer.transforms) && Number.isFinite(idx)) ? layer.transforms[idx] : null;
+                                drawBindingToComposite(lAnim, lIndex, lMulti, lTransform);
+                            }
                         }
+
+                        try { ectx.drawImage(composite, 0, 0, slice, slice, dx, dy, slice, slice); } catch (e) { /* ignore */ }
                     }
 
                     // Build extra metadata for tilesheet export
