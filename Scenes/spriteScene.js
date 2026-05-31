@@ -11829,19 +11829,29 @@ export class SpriteScene extends Scene {
                     if (!c) continue;
                     const idx = this._getAreaIndexForCoord(c.col, c.row);
                     const binding = this.getAreaBinding(idx);
+                    const hasBinding = !!(binding && binding.anim !== undefined && binding.index !== undefined);
+                    if (!hasBinding) continue;
                     const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
                     entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
                 }
                 if (entries.length > 0) {
                     const minCol = Math.min(...entries.map(e => e.col));
                     const minRow = Math.min(...entries.map(e => e.row));
+                    const maxCol = Math.max(...entries.map(e => e.col));
+                    const maxRow = Math.max(...entries.map(e => e.row));
                     // Determine origin tile relative to minCol/minRow based on mouse position
                     let originOffsetTile = { ox: 0, oy: 0 };
                     try {
+                        let candidateCol = minCol;
+                        let candidateRow = minRow;
                         if (posInfoForTile && typeof posInfoForTile.tileCol === 'number' && typeof posInfoForTile.tileRow === 'number') {
-                            originOffsetTile.ox = posInfoForTile.tileCol - minCol;
-                            originOffsetTile.oy = posInfoForTile.tileRow - minRow;
+                            candidateCol = posInfoForTile.tileCol;
+                            candidateRow = posInfoForTile.tileRow;
                         }
+                        const originCol = Math.max(minCol, Math.min(maxCol, candidateCol));
+                        const originRow = Math.max(minRow, Math.min(maxRow, candidateRow));
+                        originOffsetTile.ox = originCol - minCol;
+                        originOffsetTile.oy = originRow - minRow;
                     } catch (e) {}
                     this._tileClipboard = {
                         originOffsetTile,
@@ -12020,6 +12030,8 @@ export class SpriteScene extends Scene {
                     if (!c) continue;
                     const idx = this._getAreaIndexForCoord(c.col, c.row);
                     const binding = this.getAreaBinding(idx);
+                    const hasBinding = !!(binding && binding.anim !== undefined && binding.index !== undefined);
+                    if (!hasBinding) continue;
                     const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
                     entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
                     // Cut is layer-dependent: clear only active tile layer at this coord.
@@ -12028,7 +12040,23 @@ export class SpriteScene extends Scene {
                 if (entries.length > 0) {
                     const minCol = Math.min(...entries.map(e => e.col));
                     const minRow = Math.min(...entries.map(e => e.row));
+                    const maxCol = Math.max(...entries.map(e => e.col));
+                    const maxRow = Math.max(...entries.map(e => e.row));
+                    let originOffsetTile = { ox: 0, oy: 0 };
+                    try {
+                        let candidateCol = minCol;
+                        let candidateRow = minRow;
+                        if (posInfoForTile && typeof posInfoForTile.tileCol === 'number' && typeof posInfoForTile.tileRow === 'number') {
+                            candidateCol = posInfoForTile.tileCol;
+                            candidateRow = posInfoForTile.tileRow;
+                        }
+                        const originCol = Math.max(minCol, Math.min(maxCol, candidateCol));
+                        const originRow = Math.max(minRow, Math.min(maxRow, candidateRow));
+                        originOffsetTile.ox = originCol - minCol;
+                        originOffsetTile.oy = originRow - minRow;
+                    } catch (e) {}
                     this._tileClipboard = {
+                        originOffsetTile,
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
                     this._activeClipboardType = 'tile';
@@ -12171,17 +12199,46 @@ export class SpriteScene extends Scene {
                     ? this._tileClipboard.originOffsetTile : { ox: 0, oy: 0 };
                 const baseCol = col - (origin.ox|0);
                 const baseRow = row - (origin.oy|0);
+                const bindingEquals = (a, b) => {
+                    if (!a && !b) return true;
+                    if (!a || !b) return false;
+                    if ((a.anim || null) !== (b.anim || null)) return false;
+                    if ((Number(a.index) || 0) !== (Number(b.index) || 0)) return false;
+                    const am = Array.isArray(a.multiFrames) ? a.multiFrames : null;
+                    const bm = Array.isArray(b.multiFrames) ? b.multiFrames : null;
+                    if (!am && !bm) return true;
+                    if (!am || !bm) return false;
+                    if (am.length !== bm.length) return false;
+                    for (let i = 0; i < am.length; i++) {
+                        if (Number(am[i]) !== Number(bm[i])) return false;
+                    }
+                    return true;
+                };
+                const transformEquals = (a, b) => {
+                    if (!a && !b) return true;
+                    if (!a || !b) return false;
+                    return (Number(a.rot || 0) === Number(b.rot || 0)) && (!!a.flipH === !!b.flipH);
+                };
                 for (const t of tiles) {
+                    const hasBinding = !!(t && t.binding && t.binding.anim !== undefined && t.binding.index !== undefined);
+                    if (!hasBinding) continue;
                     const tCol = baseCol + (t.dc|0);
                     const tRow = baseRow + (t.dr|0);
                     const idx = this._getAreaIndexForCoord(tCol, tRow);
-                    // Use non-sync ops while pasting many tiles to avoid per-tile network/undo overhead
-                    this._activateTile(tCol, tRow, false);
-                    this._setAreaBindingAtIndex(idx, t.binding ? { ...t.binding } : { anim, index: frameIdx }, false);
-                    if (t.transform) this._setAreaTransformAtIndex(idx, { ...t.transform }, false);
+                    if (!Number.isFinite(idx) || idx < 0) continue;
+                    const activeBefore = !!(this._isTileActive && this._isTileActive(tCol, tRow));
+                    const curBinding = Array.isArray(this._areaBindings) ? this._areaBindings[idx] : null;
+                    const curTransform = Array.isArray(this._areaTransforms) ? this._areaTransforms[idx] : null;
+                    const nextBinding = { ...t.binding };
+                    const nextTransform = t.transform ? { rot: Number(t.transform.rot || 0), flipH: !!t.transform.flipH } : null;
+                    const sameBinding = bindingEquals(curBinding, nextBinding);
+                    const sameTransform = transformEquals(curTransform, nextTransform);
+                    if (activeBefore && sameBinding && sameTransform) continue;
+                    // Use the same operation path as normal tile painting/binding edits.
+                    if (!activeBefore) this._activateTile(tCol, tRow, true);
+                    if (!sameBinding) this._setAreaBindingAtIndex(idx, nextBinding, true);
+                    if (!sameTransform) this._setAreaTransformAtIndex(idx, nextTransform, true);
                 }
-                // Sync tile state once after batch paste
-                try { this._queueTileStateOp && this._queueTileStateOp(); } catch (e) {}
                 return;
             }
 
@@ -15972,20 +16029,43 @@ export class SpriteScene extends Scene {
             const prevSmooth = ctx.imageSmoothingEnabled;
             try { ctx.imageSmoothingEnabled = false; } catch (e) {}
 
-            const getScratch = (key) => {
-                if (!this._renderScratchCanvases || typeof this._renderScratchCanvases !== 'object') {
-                    this._renderScratchCanvases = Object.create(null);
+            const transformedFrameCache = this._renderOnlyTransformedFrameCache || (this._renderOnlyTransformedFrameCache = new Map());
+            if (transformedFrameCache.size > 8192) transformedFrameCache.clear();
+            const normalizeRot90 = (raw) => {
+                const n = Number(raw) || 0;
+                const q = Math.round(n / 90) * 90;
+                return ((q % 360) + 360) % 360;
+            };
+            const transformedFrameFor = (anim, frameIdx, rot, flipH) => {
+                const r = normalizeRot90(rot);
+                const f = !!flipH;
+                if (!f && r === 0) return frameFor(anim, frameIdx);
+                const k = `${anim || ''}::${Number(frameIdx) || 0}::${r}::${f ? 1 : 0}`;
+                if (transformedFrameCache.has(k)) return transformedFrameCache.get(k);
+                const src = frameFor(anim, frameIdx);
+                if (!src) {
+                    transformedFrameCache.set(k, null);
+                    return null;
                 }
-                let canvas = this._renderScratchCanvases[key];
-                if (!canvas) {
-                    canvas = document.createElement('canvas');
-                    this._renderScratchCanvases[key] = canvas;
+                let out = null;
+                try {
+                    out = document.createElement('canvas');
+                    out.width = src.width;
+                    out.height = src.height;
+                    const tctx = out.getContext('2d');
+                    try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                    tctx.clearRect(0, 0, out.width, out.height);
+                    tctx.save();
+                    tctx.translate(out.width / 2, out.height / 2);
+                    if (f) tctx.scale(-1, 1);
+                    if (r) tctx.rotate((r * Math.PI) / 180);
+                    tctx.drawImage(src, -out.width / 2, -out.height / 2);
+                    tctx.restore();
+                } catch (e) {
+                    out = src;
                 }
-                const w = Math.max(1, Math.floor(sx));
-                const h = Math.max(1, Math.floor(sy));
-                if (canvas.width !== w) canvas.width = w;
-                if (canvas.height !== h) canvas.height = h;
-                return canvas;
+                transformedFrameCache.set(k, out || null);
+                return out || null;
             };
 
             const drawTileAt = (col, row, isActive) => {
@@ -16021,63 +16101,24 @@ export class SpriteScene extends Scene {
                     const b = entry.binding;
                     const anim = b.anim;
                     const multi = Array.isArray(b.multiFrames) ? b.multiFrames : null;
-                    const hasTransform = !!(entry.transform && ((entry.transform.rot || 0) !== 0 || entry.transform.flipH));
-                    if (!hasTransform) {
-                        ctx.save();
-                        ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
-                        if (multi && multi.length > 0) {
-                            for (let mi = 0; mi < multi.length; mi++) {
-                                const fi = Number(multi[mi]);
-                                if (!Number.isFinite(fi)) continue;
-                                const fr = frameFor(anim, fi);
-                                if (!fr) continue;
-                                ctx.drawImage(fr, dx, dy, dw, dh);
-                            }
-                        } else {
-                            const fr = frameFor(anim, Number(b.index) || 0);
-                            if (fr) ctx.drawImage(fr, dx, dy, dw, dh);
+                    const t = entry.transform || null;
+                    const rot = t ? Number(t.rot || 0) : 0;
+                    const flipH = !!(t && t.flipH);
+                    ctx.save();
+                    ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                    if (multi && multi.length > 0) {
+                        for (let mi = 0; mi < multi.length; mi++) {
+                            const fi = Number(multi[mi]);
+                            if (!Number.isFinite(fi)) continue;
+                            const fr = transformedFrameFor(anim, fi, rot, flipH);
+                            if (!fr) continue;
+                            ctx.drawImage(fr, dx, dy, dw, dh);
                         }
-                        ctx.restore();
                     } else {
-                        // Compose into scratch canvas and apply transform then draw
-                        const composeCanvas = getScratch('compose');
-                        const cctx = composeCanvas.getContext('2d');
-                        try { cctx.imageSmoothingEnabled = false; } catch (e) {}
-                        cctx.clearRect(0, 0, composeCanvas.width, composeCanvas.height);
-                        if (multi && multi.length > 0) {
-                            for (let mi = 0; mi < multi.length; mi++) {
-                                const fi = Number(multi[mi]);
-                                if (!Number.isFinite(fi)) continue;
-                                const fr = frameFor(anim, fi);
-                                if (!fr) continue;
-                                cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
-                            }
-                        } else {
-                            const fr = frameFor(anim, Number(b.index) || 0);
-                            if (fr) cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
-                        }
-
-                        let drawable = composeCanvas;
-                        try {
-                            const t = entry.transform || {};
-                            const tcanvas = getScratch('transform');
-                            const tctx = tcanvas.getContext('2d');
-                            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
-                            tctx.clearRect(0, 0, tcanvas.width, tcanvas.height);
-                            tctx.save();
-                            tctx.translate(tcanvas.width / 2, tcanvas.height / 2);
-                            if (t.flipH) tctx.scale(-1, 1);
-                            tctx.rotate((Number(t.rot || 0) * Math.PI) / 180);
-                            tctx.drawImage(composeCanvas, -tcanvas.width / 2, -tcanvas.height / 2);
-                            tctx.restore();
-                            drawable = tcanvas;
-                        } catch (e) {}
-
-                        ctx.save();
-                        ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
-                        ctx.drawImage(drawable, dx, dy, dw, dh);
-                        ctx.restore();
+                        const fr = transformedFrameFor(anim, Number(b.index) || 0, rot, flipH);
+                        if (fr) ctx.drawImage(fr, dx, dy, dw, dh);
                     }
+                    ctx.restore();
                     if ((Number(entry.darken) || 0) > 0) {
                         ctx.save();
                         ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
@@ -17030,6 +17071,7 @@ export class SpriteScene extends Scene {
     _clearTileRenderCaches() {
         try { if (this._renderOnlyEntryCache && this._renderOnlyEntryCache instanceof Map) this._renderOnlyEntryCache.clear(); } catch (e) {}
         try { if (this._renderOnlyFrameCache && this._renderOnlyFrameCache instanceof Map) this._renderOnlyFrameCache.clear(); } catch (e) {}
+        try { if (this._renderOnlyTransformedFrameCache && this._renderOnlyTransformedFrameCache instanceof Map) this._renderOnlyTransformedFrameCache.clear(); } catch (e) {}
         try { if (this._compositedFrameCache && this._compositedFrameCache instanceof Map) this._compositedFrameCache.clear(); } catch (e) {}
         try { this._renderScratchCanvases = Object.create(null); } catch (e) { this._renderScratchCanvases = null; }
     }
@@ -17260,9 +17302,25 @@ export class SpriteScene extends Scene {
                 }
                 if (keysToRemove.size > 0) {
                     for (const k of keysToRemove) frameCache.delete(k);
+                    try {
+                        const transformedCache = this._renderOnlyTransformedFrameCache;
+                        if (transformedCache && typeof transformedCache.delete === 'function') {
+                            for (const k of keysToRemove) {
+                                const prefix = String(k) + '::';
+                                for (const tk of Array.from(transformedCache.keys())) {
+                                    if (typeof tk !== 'string') continue;
+                                    if (tk.startsWith(prefix)) transformedCache.delete(tk);
+                                }
+                            }
+                        }
+                    } catch (e) {}
                 } else {
                     // If we couldn't find specific keys, do a conservative prune when cache grows
                     if (frameCache.size > 256) frameCache.clear();
+                    try {
+                        const transformedCache = this._renderOnlyTransformedFrameCache;
+                        if (transformedCache && transformedCache instanceof Map && transformedCache.size > 1024) transformedCache.clear();
+                    } catch (e) {}
                 }
             } catch (e) {}
         } catch (e) {}
@@ -17318,6 +17376,18 @@ export class SpriteScene extends Scene {
                     for (const k of Array.from(fc.keys())) {
                         if (typeof k !== 'string') continue;
                         if (k.indexOf(a + '::' + fi) !== -1) fc.delete(k);
+                    }
+                }
+            } catch (e) {}
+
+            // Invalidate transformed render-only frame variants for this anim/frame.
+            try {
+                const tfc = this._renderOnlyTransformedFrameCache;
+                if (tfc && typeof tfc.delete === 'function') {
+                    const prefix = a + '::' + fi + '::';
+                    for (const k of Array.from(tfc.keys())) {
+                        if (typeof k !== 'string') continue;
+                        if (k.startsWith(prefix)) tfc.delete(k);
                     }
                 }
             } catch (e) {}
